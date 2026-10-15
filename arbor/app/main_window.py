@@ -741,8 +741,11 @@ class MainWindow(QtWidgets.QMainWindow):
         elif kind == "generate":
             req: GenerationRequest = context[1]
             warn = context[2] if len(context) > 2 else ""
-            if warn and not any(i.code == "invalid_model_mesh" for i in result.issues):
+            if warn:
+                # the diagnostic from the mesh check is more specific than the engine's
+                # generic invalid_model_mesh warning: keep only the detailed one
                 from arbor.engine.types import Issue
+                result.issues[:] = [i for i in result.issues if i.code != "invalid_model_mesh"]
                 result.issues.insert(0, Issue("warning", "invalid_model_mesh",
                                               warn.replace("\n", " ")))
             if not p.apply_result(result, req, text="Generate supports" if req.mode == "full"

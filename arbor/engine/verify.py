@@ -17,6 +17,7 @@ Checks (code -> meaning):
   below_plate          support geometry under z = 0
   invalid_support_mesh the merged support mesh is not a closed 2-manifold
   contacts_too_close   two active contacts closer than min_contact_distance
+  invalid_model_mesh   the input model is not closed / consistently oriented (warning)
   rests_on_model       informational: supports standing on the model (marks on the part)
   collision_check_skipped  model is not a valid manifold, overlap could not be measured
   geometric_only       informational reminder that checks are geometric, not a print test
@@ -34,6 +35,8 @@ from .types import AnalysisResult, Contact, Issue, NodeKind, Progress, SupportTr
 
 PLATE_EPS = 0.3          # a foot is on the plate if within this of z_base
 SLENDER_RATIO = 18.0     # column height / foot radius above which a trunk is flagged
+COLLISION_ERROR_FACTOR = 3.0   # overlap above this multiple of the tip budget is an error
+MODEL_FOOT_TOL = 0.3     # max distance (mm) between a model foot and the model surface
 
 
 def _routed_contact_ids(tree: SupportTree) -> set[int]:
@@ -166,9 +169,11 @@ def _check_tree(tree: SupportTree, params, issues):
                                            <= params.brace_max_length)
         if braced:
             continue
+        hints = [x for x, on in (("braces", not params.braces_enabled),
+                                 ("a raft", not params.raft_enabled), ("a larger foot", True)) if on]
         issues.append(Issue("warning", "unstable_trunk",
-                            f"Tree of height {h:.1f} mm stands on a {2 * fr:.1f} mm foot without "
-                            f"braces: it may wobble or detach (consider braces, a raft or a larger foot)",
+                            f"Tree of height {h:.1f} mm stands on a {2 * fr:.1f} mm foot with no "
+                            f"brace near it: it may wobble or detach (consider {', '.join(hints)})",
                             rn.position.copy()))
 
     model_feet = [n for n in tree.nodes.values() if n.kind == NodeKind.MODEL_FOOT]
@@ -201,6 +206,8 @@ def _check_mesh(mesh, support_mesh, tree, contacts, params, issues):
     except Exception:
         comps = [support_mesh]
     for comp in comps:
+        if comp.is_watertight and comp.volume < 0:
+            continue  # inverted shell = closed void inside a solid trunk, not a separate part
         lo, hi = comp.bounds
         if lo[2] <= z_base + PLATE_EPS:
             continue
@@ -238,9 +245,42 @@ def _check_mesh(mesh, support_mesh, tree, contacts, params, issues):
             pos = biggest.bounds.mean(axis=0)
         except Exception:
             pass
-        issues.append(Issue("warning", "model_collision",
+        severe = vol > COLLISION_ERROR_FACTOR * budget
+        issues.append(Issue("error" if severe else "warning", "model_collision",
                             f"Supports overlap the model by {vol:.2f} mm3 (allowed for tips: "
-                            f"{budget:.2f} mm3): a branch may cut into the part", pos))
+                            f"{budget:.2f} mm3): a branch "
+                            f"{'cuts through' if severe else 'may cut into'} the part", pos))
+
+
+def _check_model_feet(mesh, tree, params, issues):
+    """A MODEL_FOOT must actually touch the model (do not trust the tree's label)."""
+    feet = [n for n in tree.nodes.values() if n.kind == NodeKind.MODEL_FOOT]
+    if not feet or len(mesh.faces) == 0:
+        return
+    pts = np.array([n.position for n in feet])
+    try:
+        _, dist, _ = trimesh.proximity.closest_point(mesh, pts)
+    except Exception:
+        return
+    tol = MODEL_FOOT_TOL + params.tip_penetration
+    for n, d in zip(feet, dist):
+        if d > tol:
+            issues.append(Issue("error", "floating_support",
+                                f"A support meant to stand on the model ends {d:.2f} mm away from it "
+                                f"(z={n.position[2]:.2f} mm): it would print in the air",
+                                n.position.copy(), n.contact_id))
+
+
+def _check_model_mesh(mesh, issues):
+    try:
+        ok = mesh.is_watertight and mesh.is_winding_consistent
+    except Exception:
+        ok = False
+    if not ok:
+        issues.append(Issue("warning", "invalid_model_mesh",
+                            "The model mesh is not closed or has inconsistent normals: overhang "
+                            "detection may be wrong and the collision check is unreliable. "
+                            "Run the mesh check and repair it, then regenerate."))
 
 
 def _check_spacing(contacts, params, issues):
@@ -274,7 +314,9 @@ def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Conta
     progress.update(0.15, "Checking coverage")
     _check_regions(analysis, contacts, routed, params, issues)
     progress.update(0.4, "Checking trees")
+    _check_model_mesh(mesh, issues)
     _check_tree(tree, params, issues)
+    _check_model_feet(mesh, tree, params, issues)
     _check_spacing(contacts, params, issues)
     progress.update(0.55, "Checking meshes")
     _check_mesh(mesh, support_mesh, tree, contacts, params, issues)

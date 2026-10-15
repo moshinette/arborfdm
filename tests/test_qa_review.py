@@ -113,9 +113,6 @@ def test_figurine_normal_tips_touch_and_no_error(fig_normal, figurine):
     assert dm.max() <= 0.1                                   # model feet are on the model
 
 
-@pytest.mark.xfail(strict=True, reason="QA-1: floating_support false positives: the manifold "
-                   "union leaves inverted inner shells (voids of ~0.001 mm3) inside grounded "
-                   "trunks; verify counts them as floating parts")
 def test_dense02_figurine_has_no_false_floating_support(figurine):
     r = pipeline.generate(figurine, DENSE02)
     comps = r.support_mesh.split(only_watertight=False)
@@ -126,8 +123,6 @@ def test_dense02_figurine_has_no_false_floating_support(figurine):
     assert floating == [], [i.message for i in floating]
 
 
-@pytest.mark.xfail(strict=True, reason="QA-1: the CLI on the flagship example with the default "
-                   "profile exits 1 because of a false floating_support error")
 def test_cli_default_figurine_exits_zero(tmp_path):
     from arbor.cli import main
     rc = main(["generate", str(FIGURINE), "-o", str(tmp_path / "f.3mf"), "-q",
@@ -242,9 +237,6 @@ def test_min_contact_spacing_bounded_memory():
     assert rc == 0 and "OK" in out, err[-400:]
 
 
-@pytest.mark.xfail(strict=True, reason="QA-8: no size guard: a figurine scaled x25.4 (1.5 m, "
-                   "e.g. wrong units or 2540 % in the GUI) ends in MemoryError / OOM kill instead of "
-                   "a clear refusal")
 def test_huge_model_is_refused_cleanly():
     rc, out, err, wall, _ = _run_limited("""
         from arbor.core.mesh_io import load_mesh
@@ -261,8 +253,6 @@ def test_huge_model_is_refused_cleanly():
     assert "REFUSED" in out or "GENERATED" in out, err[-300:]
 
 
-@pytest.mark.xfail(strict=True, reason="QA-12: a 60 mm figurine saved in inches (2.36 mm once "
-                   "read as mm) gets no scale warning (threshold 2 mm) and silently 0 supports")
 def test_inch_sized_model_gets_scale_warning(tmp_path, figurine):
     m = figurine.copy()
     m.apply_scale(1 / 25.4)
@@ -272,9 +262,6 @@ def test_inch_sized_model_gets_scale_warning(tmp_path, figurine):
     assert any("scale" in w.lower() for w in lm.warnings), lm.warnings
 
 
-@pytest.mark.xfail(strict=True, reason="QA-6: an unrepaired broken mesh is processed without any "
-                   "warning or error naming the mesh (only info 'collision_check_skipped'); the "
-                   "GUI lets the user generate on it")
 def test_unrepaired_broken_mesh_is_flagged(figurine):
     rng = np.random.default_rng(0)
     keep = rng.random(len(figurine.faces)) > 0.05
@@ -378,16 +365,12 @@ def test_verify_measures_support_crossing_model(arm_result):
     assert col and float(re.search(r"by ([\d.]+) mm3", col[0].message).group(1)) > 100
 
 
-@pytest.mark.xfail(strict=True, reason="QA-4: a 2.4 mm pillar crossing the whole model (132 mm3 "
-                   "overlap, 116x the tip budget) is only a warning: CLI exit code 0")
 def test_verify_support_crossing_model_is_an_error(arm_result):
     m, r = arm_result
     iss = _verify(m, r, sm=trimesh.util.concatenate([r.support_mesh, _pillar_through(m)]))
     assert "model_collision" in _codes(iss, "error")
 
 
-@pytest.mark.xfail(strict=True, reason="QA-5: verify trusts the tree's MODEL_FOOT label: a support "
-                   "'standing on the model' 40 mm away from it passes without any error")
 def test_verify_detects_model_foot_in_the_air(arm_result):
     m, r = arm_result
     t = copy.deepcopy(r.tree)
@@ -524,9 +507,6 @@ def test_cli_exit_codes_and_report(tmp_path):
     assert len(rep["contacts"]) == rep["tree"]["tips"] > 0
 
 
-@pytest.mark.xfail(strict=True, reason="QA-10: validate() does not bound several geometric "
-                   "parameters: trunk_diameter=-2, foot_diameter=0, segment_length=0 are accepted "
-                   "(exit 0, file written); contact_spacing=nan gives 'arange: cannot compute length'")
 @pytest.mark.parametrize("assign", ["trunk_diameter=-2", "foot_diameter=0", "segment_length=0",
                                     "contact_spacing=nan"])
 def test_validate_rejects_invalid_geometry_params(tmp_path, assign):
@@ -534,9 +514,6 @@ def test_validate_rejects_invalid_geometry_params(tmp_path, assign):
     assert p.validate(), f"validate() accepts {assign}"
 
 
-@pytest.mark.xfail(strict=True, reason="QA-10: raft_thickness=-1 with raft enabled ends in an "
-                   "uncaught RuntimeError traceback (exit 1, i.e. the 'problems' code) instead of "
-                   "a usage error (exit 2)")
 def test_cli_negative_raft_thickness_is_usage_error(tmp_path):
     rc, _ = _cli([str(EX / "suspended_arm.stl"), "-o", str(tmp_path / "o.3mf"), "--set",
                   "raft_enabled=true", "--set", "raft_thickness=-1"], tmp_path)

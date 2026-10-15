@@ -103,7 +103,31 @@ class SupportParams:
 
     def validate(self) -> list[str]:
         """Return a list of human readable problems (empty = valid)."""
+        import math
         p = []
+        for f in fields(self):
+            v = getattr(self, f.name)
+            if isinstance(v, float) and not math.isfinite(v):
+                p.append(f"{f.name} must be a finite number")
+        if p:
+            return p
+        positive = ("line_width", "layer_height", "tip_diameter", "tip_length", "tip_base_diameter",
+                    "branch_min_diameter", "branch_max_diameter", "segment_length",
+                    "trunk_diameter", "foot_diameter", "collar_diameter", "on_model_tip_diameter",
+                    "brace_diameter", "brace_spacing_z", "brace_max_length")
+        for name in positive:
+            if getattr(self, name) <= 0:
+                p.append(f"{name} must be > 0")
+        non_negative = ("merge_distance", "min_region_area", "tip_penetration", "z_gap", "xy_clearance",
+                        "trunk_growth_per_mm", "min_tree_distance", "foot_height", "collar_height",
+                        "brace_min_height", "raft_margin")
+        for name in non_negative:
+            if getattr(self, name) < 0:
+                p.append(f"{name} must be >= 0")
+        if self.raft_enabled and self.raft_thickness <= 0:
+            p.append("raft_thickness must be > 0 when the raft is enabled")
+        if self.junction_radius_factor < 1.0:
+            p.append("junction_radius_factor must be >= 1")
         if not 0.1 <= self.nozzle_diameter <= 1.2:
             p.append("nozzle_diameter out of range [0.1, 1.2]")
         if not 0.02 <= self.layer_height <= 0.8 * self.nozzle_diameter:

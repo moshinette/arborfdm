@@ -107,7 +107,7 @@ def _unit_warnings(mesh: trimesh.Trimesh, declared: Optional[str]) -> list[str]:
     ext = float(np.max(mesh.bounds[1] - mesh.bounds[0]))
     if declared is None:
         w.append("File format carries no unit: millimetres assumed.")
-        if ext < 2.0:
+        if ext < 5.0:
             w.append(f"Model is only {ext:.3g} mm large: it may have been saved in "
                      "centimetres, inches or metres. Check the scale.")
         elif ext > 2000.0:

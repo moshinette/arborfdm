@@ -24,6 +24,20 @@ from .params import SupportParams
 from .types import AnalysisResult, Contact, GenerationResult, Issue, Progress
 
 
+# Largest model extent accepted (mm). Desktop FDM build volumes are <= ~500 mm; anything
+# larger is almost always a unit or scale mistake and would exhaust memory (QA-8).
+MAX_MODEL_EXTENT_MM = 1000.0
+
+
+def check_model_size(mesh: trimesh.Trimesh) -> None:
+    if len(mesh.vertices) == 0:
+        raise ValueError("The model is empty")
+    ext = float(max(mesh.extents))
+    if ext > MAX_MODEL_EXTENT_MM:
+        raise ValueError(f"The model is {ext:.0f} mm long, larger than {MAX_MODEL_EXTENT_MM:.0f} mm: "
+                         "check the units or the scale before generating supports")
+
+
 def analyze(mesh: trimesh.Trimesh, params: SupportParams,
             progress: Optional[Progress] = None) -> AnalysisResult:
     return _analysis.analyze(mesh, params, progress or Progress())
@@ -44,6 +58,7 @@ def generate(mesh: trimesh.Trimesh, params: SupportParams,
     problems = params.validate()
     if problems:
         raise ValueError("Invalid parameters: " + "; ".join(problems))
+    check_model_size(mesh)
     timings: dict[str, float] = {}
 
     t = time.perf_counter()
