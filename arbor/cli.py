@@ -6,13 +6,17 @@
                  [--model-layer-height MM] [--support-layer-height MM]
                  [--open-in-orca [--orca-path PATH]]   (-o optional with --open-in-orca)
     arborfdm-cli check in.stl [--json report.json]
+    arborfdm-cli compare in.stl --profile KEY [--profile KEY | --preset NAME ...]
+                 [--set key=value ...] [--repair] [--auto-orient]
+                 [--json f.json] [--md f.md] [--csv f.csv]
     arborfdm-cli orca --find | --set-path PATH | --clear-path
     arborfdm-cli profiles [--json]
 
 Exit codes
     0  success (warnings may have been printed)
     1  the work was done but problems remain: verification errors after generation,
-       export validation problems, or (``check``) an invalid mesh
+       export validation problems, (``check``) an invalid mesh, or (``compare``) a
+       configuration with verification errors or rejected by the engine
     2  input / usage error (unreadable file, unknown profile or parameter, invalid mesh
        without --repair, failed repair, nothing to support...)
     130 interrupted (Ctrl+C)
@@ -332,39 +336,12 @@ def cmd_orca(args, out: _Out) -> int:
     return EXIT_PROBLEMS
 
 
-def cmd_generate(args, out: _Out) -> int:
+def _prepare_mesh(args, out: _Out, report: dict, overhang_angle_deg: float):
+    """Load, check, optionally repair (a copy) and orient, then place the mesh on the
+    plate (shared by generate and compare). Fills report; raises CliError."""
     import numpy as np
     from arbor.core.repair import check_mesh, repair_mesh
     from arbor.core.transform import apply_transform, plate_matrix
-    from arbor.engine import pipeline
-    from arbor.engine.types import Progress
-    from arbor.io.export import export_3mf, export_stl, validate_export
-
-    if not args.output and not args.open_in_orca:
-        raise CliError("-o/--output is required (or use --open-in-orca)")
-    if args.orca_path and not args.open_in_orca:
-        raise CliError("--orca-path needs --open-in-orca")
-    out_path = Path(args.output) if args.output else None
-    if out_path is not None and out_path.suffix.lower() not in (".3mf", ".stl"):
-        raise CliError("output must end with .3mf or .stl")
-    layer_heights = {k: v for k, v in (("model", args.model_layer_height),
-                                       ("supports", args.support_layer_height)) if v is not None}
-    sep_output = (out_path is not None and args.layout == "separate"
-                  and out_path.suffix.lower() == ".3mf")
-    if layer_heights and not (sep_output or args.open_in_orca):
-        raise CliError("--model-layer-height / --support-layer-height need a .3mf output "
-                       "and --layout separate (or --open-in-orca)")
-    orca_exe = _resolve_orca(args.orca_path, out) if args.open_in_orca else None
-    for k, v in layer_heights.items():
-        if not 0.0 < v <= 2.0:
-            raise CliError(f"--{'support' if k == 'supports' else 'model'}-layer-height must be in (0, 2] mm")
-    profiles = _load_profiles()
-    if args.profile not in profiles:
-        raise CliError(f"unknown profile {args.profile!r}; available: {', '.join(profiles)}")
-    params = apply_overrides(profiles[args.profile].params, args.set or [])
-    report: dict[str, Any] = {"input": str(Path(args.input).resolve()), "profile": args.profile,
-                              "overrides": list(args.set or []), "params": params.to_dict()}
-    t0 = time.perf_counter()
 
     lm = _load(args.input, out)
     report["load_warnings"] = list(lm.warnings)
@@ -401,7 +378,7 @@ def cmd_generate(args, out: _Out) -> int:
     matrix = np.eye(4)
     if args.auto_orient:
         from arbor.core.orientation import suggest_orientations
-        cands = suggest_orientations(mesh, overhang_angle_deg=params.overhang_angle_deg, n=3)
+        cands = suggest_orientations(mesh, overhang_angle_deg=overhang_angle_deg, n=3)
         if cands:
             best = cands[0]
             out.info(f"Orientation: {best.describe()}")
@@ -418,6 +395,41 @@ def cmd_generate(args, out: _Out) -> int:
     report["plate_transform"] = (place @ matrix)
     s = mesh.bounds[1] - mesh.bounds[0]
     out.info(f"On plate: {s[0]:.2f} x {s[1]:.2f} x {s[2]:.2f} mm (XY centred, min z = 0)")
+    return lm, mesh
+
+
+def cmd_generate(args, out: _Out) -> int:
+    from arbor.engine import pipeline
+    from arbor.engine.types import Progress
+    from arbor.io.export import export_3mf, export_stl, validate_export
+
+    if not args.output and not args.open_in_orca:
+        raise CliError("-o/--output is required (or use --open-in-orca)")
+    if args.orca_path and not args.open_in_orca:
+        raise CliError("--orca-path needs --open-in-orca")
+    out_path = Path(args.output) if args.output else None
+    if out_path is not None and out_path.suffix.lower() not in (".3mf", ".stl"):
+        raise CliError("output must end with .3mf or .stl")
+    layer_heights = {k: v for k, v in (("model", args.model_layer_height),
+                                       ("supports", args.support_layer_height)) if v is not None}
+    sep_output = (out_path is not None and args.layout == "separate"
+                  and out_path.suffix.lower() == ".3mf")
+    if layer_heights and not (sep_output or args.open_in_orca):
+        raise CliError("--model-layer-height / --support-layer-height need a .3mf output "
+                       "and --layout separate (or --open-in-orca)")
+    orca_exe = _resolve_orca(args.orca_path, out) if args.open_in_orca else None
+    for k, v in layer_heights.items():
+        if not 0.0 < v <= 2.0:
+            raise CliError(f"--{'support' if k == 'supports' else 'model'}-layer-height must be in (0, 2] mm")
+    profiles = _load_profiles()
+    if args.profile not in profiles:
+        raise CliError(f"unknown profile {args.profile!r}; available: {', '.join(profiles)}")
+    params = apply_overrides(profiles[args.profile].params, args.set or [])
+    report: dict[str, Any] = {"input": str(Path(args.input).resolve()), "profile": args.profile,
+                              "overrides": list(args.set or []), "params": params.to_dict()}
+    t0 = time.perf_counter()
+
+    lm, mesh = _prepare_mesh(args, out, report, params.overhang_angle_deg)
 
     # 3. generation
     out.info(f"Generating supports (profile {args.profile})...")
@@ -519,6 +531,80 @@ def cmd_generate(args, out: _Out) -> int:
     return code
 
 
+class _ConfigAction(argparse.Action):
+    """--profile / --preset of 'compare': keep them in command line order."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = list(getattr(namespace, self.dest, None) or [])
+        items.append((self.const, values))
+        setattr(namespace, self.dest, items)
+
+
+def _resolve_configs(items, overrides, out: _Out) -> list:
+    """[(label, SupportParams, source)] for compare: built-in profiles by key, user
+    presets by name, file name or 'user:' key."""
+    profiles = _load_profiles()
+    store = None
+    configs = []
+    for kind, name in items:
+        if kind == "profile":
+            if name not in profiles:
+                raise CliError(f"unknown profile {name!r}; available: {', '.join(profiles)}")
+            configs.append((name, apply_overrides(profiles[name].params, overrides), name))
+            continue
+        if store is None:
+            from arbor.core.presets import PresetStore
+            store = PresetStore(profiles)
+            for path, why in store.errors:
+                out.warn(f"user preset skipped: {why}")
+        p = (store.presets.get(name) or store.presets.get("user:" + name)
+             or store.find_by_label(name))
+        if p is None:
+            avail = ", ".join(f"{q.label!r}" for q in store.ordered()) or "none"
+            raise CliError(f"unknown user preset {name!r} (in {store.directory}); available: {avail}")
+        configs.append((p.label, apply_overrides(p.params, overrides), p.key))
+    return configs
+
+
+def cmd_compare(args, out: _Out) -> int:
+    from arbor.core.compare import compare_configs
+    from arbor.engine.types import Progress
+
+    items = args.configs or []
+    if not items:
+        raise CliError("give at least one --profile or --preset to compare "
+                       "(e.g. --profile nozzle_02_light --profile nozzle_02_normal)")
+    configs = _resolve_configs(items, args.set or [], out)
+    report: dict[str, Any] = {"input": str(Path(args.input).resolve()),
+                              "overrides": list(args.set or [])}
+    lm, mesh = _prepare_mesh(args, out, report, configs[0][1].overhang_angle_deg)
+    out.info(f"Comparing {len(configs)} configuration(s): {', '.join(c[0] for c in configs)}")
+    progress = Progress(_ProgressPrinter(out))
+    rep = compare_configs(mesh, configs, progress=progress,
+                          model_info={"name": lm.name or Path(args.input).stem,
+                                      "input": report["input"]})
+    data = rep.to_dict()
+    data["model"]["prepare"] = _jsonable({k: report[k] for k in ("check", "repair", "orientation")
+                                          if k in report})
+    print(rep.to_text(), flush=True)
+    written = []
+    if args.json:
+        _write_json(args.json, data)
+        written.append(args.json)
+    for path, text in ((args.md, rep.to_markdown), (args.csv, rep.to_csv)):
+        if path:
+            pth = Path(path)
+            pth.parent.mkdir(parents=True, exist_ok=True)
+            pth.write_text(text(), encoding="utf-8", newline="")
+            written.append(path)
+    for w in written:
+        out.info(f"Wrote {w}")
+    bad = [c.label for c in rep.configs if not c.ok or c.errors]
+    if bad:
+        out.warn(f"verification errors or failure for: {', '.join(bad)}")
+    return EXIT_PROBLEMS if bad else EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
@@ -576,6 +662,25 @@ def make_parser() -> argparse.ArgumentParser:
     c.add_argument("input")
     c.add_argument("--json", metavar="FILE", help="write a JSON report")
     c.set_defaults(func=cmd_check)
+
+    cp = sub.add_parser("compare", parents=[common],
+                        help="run several profiles / presets on one model and compare them")
+    cp.add_argument("input", help="model file (STL, OBJ or 3MF), millimetres")
+    cp.add_argument("--profile", dest="configs", action=_ConfigAction, const="profile",
+                    metavar="KEY", help="built-in profile to compare, repeatable")
+    cp.add_argument("--preset", dest="configs", action=_ConfigAction, const="preset",
+                    metavar="NAME", help="user preset (name or file name) to compare, repeatable")
+    cp.add_argument("--set", action="append", metavar="KEY=VALUE",
+                    help="override a parameter in every configuration, repeatable")
+    cp.add_argument("--repair", action="store_true",
+                    help="repair a copy of the mesh if it is not a valid closed solid")
+    cp.add_argument("--auto-orient", action="store_true",
+                    help="apply the best automatic orientation (computed with the first "
+                         "configuration) before generating")
+    cp.add_argument("--json", metavar="FILE", help="write the comparison as JSON")
+    cp.add_argument("--md", metavar="FILE", help="write the comparison as a Markdown table")
+    cp.add_argument("--csv", metavar="FILE", help="write the comparison as CSV")
+    cp.set_defaults(func=cmd_compare, configs=None)
 
     p = sub.add_parser("profiles", parents=[common], help="list the support profiles")
     p.add_argument("--json", action="store_true", help="print profiles and values as JSON")

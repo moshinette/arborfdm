@@ -64,6 +64,15 @@ python -m arbor generate examples/figurine.stl -o out/figurine.3mf --profile noz
 python -m arbor generate model.stl -o out.3mf --profile nozzle_02_dense --set tip_diameter=0.3 --repair --auto-orient
 ```
 
+Compare several profiles or user presets on the same model before printing (same load / repair / orientation steps as `generate`, nothing is exported):
+
+```
+python -m arbor compare examples/figurine.stl --profile nozzle_02_light --profile nozzle_02_normal --profile nozzle_02_dense
+python -m arbor compare model.stl --profile nozzle_04_normal --preset "My figurines" --set tip_diameter=0.4 --md cmp.md --csv cmp.csv --json cmp.json
+```
+
+The table gives, per configuration: contacts (and how many supports stand on the model), trees, support volume and PLA mass (1.24 g/cm3), total contact area on the model (a proxy of the marks), highest tree, largest slenderness, errors and warnings by code, time. The "best" lines only name the lowest value per criterion (fewest marks, least material, fewest issues); they do not say which configuration prints better. `--preset` takes a user preset name; `--set` applies to every configuration. Exit code 1 if a configuration has verification errors.
+
 With the Windows release, use `arborfdm-cli.exe` instead of `python -m arbor`. Exit codes: 0 success, 1 file written but verification errors, 2 input error, 130 interrupted. Full reference: [`docs/PACKAGING.md`](docs/PACKAGING.md#cli).
 
 ## In your slicer
@@ -78,6 +87,7 @@ Documentation is currently in French (the interface is in English).
 |---|---|
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | User guide of the GUI |
 | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) | Known limitations, what is not validated |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Roadmap: what is planned, with value and cost estimates |
 | [`docs/SLICERS.md`](docs/SLICERS.md) | Slicer compatibility |
 | [`docs/PHYSICAL_TESTS.md`](docs/PHYSICAL_TESTS.md) | Print test protocol (help wanted) |
 | [`docs/ALGORITHM.md`](docs/ALGORITHM.md) | How the engine works |

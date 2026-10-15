@@ -310,6 +310,7 @@ class Viewport(gl.GLViewWidget):
     contactRemoveRequested = QtCore.Signal(int)
     contactSelected = QtCore.Signal(object)                 # contact id or None
     hoverChanged = QtCore.Signal(object)                    # hit position or None
+    hoverTargetChanged = QtCore.Signal()     # contact / issue marker under the cursor changed
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
@@ -344,6 +345,8 @@ class Viewport(gl.GLViewWidget):
         self._press_pos: Optional[QtCore.QPointF] = None
         self._press_button = None
         self._hover_pos: Optional[QtCore.QPointF] = None
+        self.hovered_contact_id: Optional[int] = None
+        self.hovered_issue: Optional[int] = None          # index in self.issues
         self._picker: Optional[BackgroundPicker] = None
 
         self.grid = gl.GLGridItem(color=theme.GRID_COLOR)
@@ -436,6 +439,8 @@ class Viewport(gl.GLViewWidget):
 
     def set_issues(self, issues: list) -> None:
         self.issues = list(issues)
+        if self.hovered_issue is not None:
+            self._set_hover_target(self.hovered_contact_id, None)
         self._update_issues()
 
     def set_selected(self, contact_id: Optional[int]) -> None:
@@ -546,8 +551,8 @@ class Viewport(gl.GLViewWidget):
         counts: dict[str, int] = {}
         for c in self.contacts:
             counts[c.reason.value] = counts.get(c.reason.value, 0) + 1
-        counts["unsupported"] = sum(1 for i in self.issues if i.position is not None
-                                    and i.severity == "error")
+        counts["unsupported"] = sum(1 for i in self.issues if self.issue_point(i) is not None
+                                    and getattr(i, "severity", "") == "error")
         counts["supports"] = "yes" if self.support_mesh is not None else "-"
         self.legend.set_counts(counts)
         self._place_legend()
@@ -567,15 +572,36 @@ class Viewport(gl.GLViewWidget):
         else:
             self.selection_item.setData(pos=np.zeros((0, 3)))
 
+    @staticmethod
+    def issue_point(issue) -> Optional[np.ndarray]:
+        """3D position of an issue marker, or None (no position, or not a finite 3D point:
+        issues of any code, known or not, are drawn only from a valid position)."""
+        pos = getattr(issue, "position", None)
+        if pos is None:
+            return None
+        try:
+            p = np.asarray(pos, float).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        if p.size < 3 or not np.all(np.isfinite(p[:3])):
+            return None
+        return p[:3]
+
+    def _visible_issue_points(self) -> list[tuple[int, np.ndarray]]:
+        out = []
+        for k, i in enumerate(self.issues):
+            p = self.issue_point(i)
+            if p is None or (self.clip_z is not None and p[2] > self.clip_z):
+                continue
+            out.append((k, p))
+        return out
+
     def _update_issues(self) -> None:
         pts, cols, lines, lcols = [], [], [], []
-        for i in self.issues:
-            if i.position is None:
-                continue
-            p = np.asarray(i.position, float)
-            if self.clip_z is not None and p[2] > self.clip_z:
-                continue
-            c = theme.UNSUPPORTED_COLOR if i.severity == "error" else theme.WARNING_MARK_COLOR
+        for k, p in self._visible_issue_points():
+            sev = getattr(self.issues[k], "severity", "")
+            c = (theme.UNSUPPORTED_COLOR if sev == "error" else
+                 theme.INFO_MARK_COLOR if sev == "info" else theme.WARNING_MARK_COLOR)
             pts.append(p)
             cols.append(c)
             # a short vertical drop line makes the marker readable in 3D
@@ -720,6 +746,23 @@ class Viewport(gl.GLViewWidget):
                     return None
         return cs[k].id
 
+    def pick_issue(self, x: float, y: float, radius_px: float = CONTACT_PICK_RADIUS_PX
+                   ) -> Optional[int]:
+        """Index (in self.issues) of the issue marker under pixel (x, y), or None."""
+        vis = self._visible_issue_points()
+        if not vis:
+            return None
+        px, front = self.project_points(np.array([p for _, p in vis]))
+        d = np.hypot(px[:, 0] - x, px[:, 1] - y)
+        d[~front] = np.inf
+        k = int(np.argmin(d))
+        return vis[k][0] if d[k] <= radius_px else None
+
+    def _set_hover_target(self, contact_id: Optional[int], issue: Optional[int]) -> None:
+        if (contact_id, issue) != (self.hovered_contact_id, self.hovered_issue):
+            self.hovered_contact_id, self.hovered_issue = contact_id, issue
+            self.hoverTargetChanged.emit()
+
     # ------------------------------------------------------------------ mouse
     def handle_click(self, x: float, y: float, button) -> str:
         """Interpret a click. Returns what happened (used by tests)."""
@@ -776,6 +819,7 @@ class Viewport(gl.GLViewWidget):
 
     def leaveEvent(self, ev) -> None:
         self.ghost_item.hide()
+        self._set_hover_target(None, None)
         self.hoverChanged.emit(None)
         self.update()
         super().leaveEvent(ev)
@@ -784,9 +828,11 @@ class Viewport(gl.GLViewWidget):
         if self._hover_pos is None:
             return
         x, y = self._hover_pos.x(), self._hover_pos.y()
+        cid = self.pick_contact(x, y, wait=False)
+        self._set_hover_target(cid, self.pick_issue(x, y) if cid is None else None)
         hit = (self.pick_model(x, y, wait=False) if (self.ghost_enabled and self.edit_enabled)
                else None)
-        if hit is None or self.pick_contact(x, y, wait=False) is not None:
+        if hit is None or cid is not None:
             if self.ghost_item.visible():
                 self.ghost_item.hide()
                 self.update()
@@ -915,6 +961,18 @@ class ViewportContainer(QtWidgets.QWidget):
         self.banner.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
         self.banner.hide()
         self.banner_kind = ""
+        # what the cursor points at (or the selected contact): reason, note, issue message
+        self.info_card = QtWidgets.QLabel("", self.viewport)
+        self.info_card.setObjectName("infoCard")
+        self.info_card.setTextFormat(QtCore.Qt.RichText)
+        self.info_card.setWordWrap(True)
+        self.info_card.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.info_card.setStyleSheet(f"QLabel#infoCard {{ background: {theme.OVERLAY_BG};"
+                                     f" color: {theme.TEXT}; border: 1px solid {theme.BORDER};"
+                                     f" border-radius: {theme.R_L}px;"
+                                     f" padding: {theme.SP_S + 2}px {theme.SP_M + 2}px;"
+                                     f" font-size: {theme.FS_SMALL}pt; }}")
+        self.info_card.hide()
 
         side = QtWidgets.QFrame(objectName="cutbar")
         sl = QtWidgets.QVBoxLayout(side)
@@ -957,7 +1015,45 @@ class ViewportContainer(QtWidgets.QWidget):
             if not self.empty_label.isHidden():
                 self._place_empty()
             self._place_busy()
+            if not self.info_card.isHidden():
+                self._place_info()
         return False
+
+    INFO_MAX_W = 420
+
+    def set_info(self, html: str) -> None:
+        """Card at the bottom of the view describing the hovered / selected contact or the
+        hovered issue marker (empty text hides it)."""
+        if not html:
+            self.info_card.hide()
+            self.info_card.setText("")
+            return
+        if html != self.info_card.text():
+            self.info_card.setText(html)
+        self._place_info()
+        self.info_card.show()
+        self.info_card.raise_()
+
+    def _place_info(self) -> None:
+        """Bottom of the view, right of the contact legend (above it when the view is too
+        narrow); never over the overhang legend."""
+        c, vp = self.info_card, self.viewport
+        m = theme.SP_M + 2
+        lg, ol = vp.legend, vp.overhang_legend
+        left = (lg.x() + lg.width() + m) if lg.isVisible() else m
+        right = (ol.x() - m) if ol.isVisible() else vp.width() - m
+        avail = right - left
+        if avail >= 220:
+            w = min(self.INFO_MAX_W, avail)
+            c.setFixedWidth(w)
+            c.adjustSize()
+            c.move(left, vp.height() - c.height() - m)
+        else:
+            w = max(160, min(self.INFO_MAX_W, vp.width() - 2 * m))
+            c.setFixedWidth(w)
+            c.adjustSize()
+            top = (lg.y() if lg.isVisible() else vp.height()) - c.height() - theme.SP_S
+            c.move(m, max(m, top))
 
     def _place_busy(self) -> None:
         """Progress card: centred under the state banner (top of the view, never over the

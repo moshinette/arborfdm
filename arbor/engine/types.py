@@ -144,6 +144,10 @@ class GenerationResult:
     issues: list[Issue]
     analysis: AnalysisResult
     timings: dict[str, float] = field(default_factory=dict)
+    # numbers to judge / compare generations, see verify.support_stats (support_volume_mm3,
+    # support_mass_g, contact_area_mm2, model_contacts, max_tree_height_mm,
+    # max_slenderness, issues_by_code, ...); empty if not computed
+    stats: dict = field(default_factory=dict)
 
     @property
     def errors(self) -> list[Issue]:

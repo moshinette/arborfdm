@@ -471,6 +471,32 @@ class Project:
         self.undo_stack.push(RemoveContactCommand(self, contact_id), merge=False)
         return True
 
+    def remove_contacts(self, contact_ids, text: str = "") -> int:
+        """Remove several contacts in one undoable step. Returns how many were removed."""
+        ids = [i for i in dict.fromkeys(contact_ids) if self.contact(i) is not None]
+        if not ids:
+            return 0
+        if len(ids) == 1 and not text:
+            self.undo_stack.push(RemoveContactCommand(self, ids[0]), merge=False)
+        else:
+            self.undo_stack.push(RemoveContactsCommand(self, ids, text), merge=False)
+        return len(ids)
+
+    def remove_manual_contacts(self) -> int:
+        """Remove every manual contact (one undoable step)."""
+        return self.remove_contacts([c.id for c in self.manual_contacts()],
+                                    "Remove all manual contacts")
+
+    def contacts_with_reason(self, reason) -> list[Contact]:
+        value = getattr(reason, "value", reason)
+        return [c for c in self.contacts if c.reason.value == value]
+
+    def remove_contacts_with_reason(self, reason) -> int:
+        """Remove every contact of a reason ("edge", ContactReason.MANUAL...), undoable."""
+        value = getattr(reason, "value", reason)
+        return self.remove_contacts([c.id for c in self.contacts_with_reason(value)],
+                                    f"Remove {value} contacts")
+
     def edit_contact(self, contact_id: int, **changes) -> None:
         """Undoable edit of tip_diameter / enabled (or any Contact field)."""
         c = self.contact(contact_id)
@@ -810,6 +836,35 @@ class RemoveContactCommand(Command):
 
     def undo(self) -> None:
         self.p.contacts.insert(min(self.index, len(self.p.contacts)), copy.deepcopy(self.contact))
+        self.p.contacts_edited = self.prev_edited
+        self.p.contacts_version += 1
+        self.p._emit("contacts")
+
+
+class RemoveContactsCommand(Command):
+    """Remove several contacts at once (undo puts them back at their places)."""
+
+    def __init__(self, project: Project, contact_ids, text: str = "") -> None:
+        self.p = project
+        ids = set(contact_ids)
+        self.removed = [(i, copy.deepcopy(c)) for i, c in enumerate(project.contacts)
+                        if c.id in ids]
+        self.ids = {c.id for _, c in self.removed}
+        self.prev_edited = project.contacts_edited
+        self.text = text or f"Remove {len(self.removed)} contacts"
+
+    def redo(self) -> None:
+        self.p.contacts = [c for c in self.p.contacts if c.id not in self.ids]
+        self.p.contacts_edited = True
+        self.p.contacts_version += 1
+        if self.p.selected_contact_id in self.ids:
+            self.p.selected_contact_id = None
+            self.p._emit("selection")
+        self.p._emit("contacts")
+
+    def undo(self) -> None:
+        for index, c in self.removed:          # ascending indexes: original order restored
+            self.p.contacts.insert(min(index, len(self.p.contacts)), copy.deepcopy(c))
         self.p.contacts_edited = self.prev_edited
         self.p.contacts_version += 1
         self.p._emit("contacts")

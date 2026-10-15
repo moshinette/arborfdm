@@ -11,7 +11,7 @@ from arbor.core.presets import PresetError, PresetStore, is_user_key, slugify
 from arbor.core.project import PROJECT_SUFFIX, GenerationRequest, Project
 
 from . import icons, theme
-from .panels import LeftPanel, RightPanel
+from .panels import LeftPanel, RightPanel, issue_severity, issue_text, issue_title
 from .preferences import PreferencesDialog
 from .viewport import ViewportContainer
 from .worker import TaskRunner, run_generation
@@ -26,6 +26,11 @@ EXPORT_REMINDER = (
     "  - Disable the slicer's own supports (they are already in the file).\n"
     "  - Keep the layer height of the profile ({layer:.2f} mm) so tips touch as designed.\n"
     "  - Print the supports with {walls} walls; do not move the parts relative to each other.")
+
+
+def _esc(text) -> str:
+    from html import escape
+    return escape(str(text))
 
 
 # --- background task functions (run in the worker thread) ----------------------------
@@ -90,6 +95,66 @@ def _task_export(progress, kind: str, path: str, model, supports, raft, params, 
     return []
 
 
+def _task_orca_export(progress, model, supports, raft, params, name):
+    """Write the 3MF for OrcaSlicer in its own folder (never over the source model or an
+    existing file; the slicer's supports are switched off per object)."""
+    from arbor.io import slicer_launch as sl
+    progress.update(0.2, "Writing the 3MF for OrcaSlicer")
+    notes: list = []
+    path = sl.export_for_slicer(model, supports, raft, params, name, notes=notes)
+    progress.update(0.9, "File validated")
+    return path, notes
+
+
+ORCA_REMINDER = (
+    "Keep OrcaSlicer's own supports disabled: the supports are already in the file (they are "
+    "switched off for these objects in the file, do not enable them again).\n"
+    "Keep the layer height of the profile ({layer:.2f} mm) for the supports so the tips "
+    "touch as designed, print them with {walls} walls and do not move the two objects "
+    "relative to each other.")
+
+# timings keys that are durations of the generation stages (others are statistics)
+STAGE_KEYS = ("analysis", "contacts", "tree", "mesh", "verify")
+
+
+def format_timings(timings, extra=None) -> tuple[Optional[float], str]:
+    """(total time in s or None, tooltip). Unknown keys and non numeric values of
+    ``timings`` are listed as statistics, never summed into the time; ``stats`` (dict of
+    GenerationResult.stats, when the engine provides it: ``extra``) is listed after them."""
+    timings = dict(timings or {})
+
+    def num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f else None
+
+    stages = [(k, num(timings[k])) for k in STAGE_KEYS if num(timings.get(k)) is not None]
+    if stages:
+        total = sum(v for _, v in stages)
+    else:
+        total = num(timings.get("total"))
+    lines = [f"{k}: {v:.3f} s" for k, v in stages]
+    stats = [(k, v) for k, v in timings.items() if k not in STAGE_KEYS
+             and not (k == "total" and not stages)]
+    if isinstance(extra, dict):
+        stats += [(k, v) for k, v in extra.items() if not isinstance(v, (dict, list, tuple))]
+    if stats:
+        lines.append("Statistics:")
+        for k, v in stats:
+            f = num(v)
+            if isinstance(v, bool) or f is None:
+                txt = str(v)
+            elif float(f).is_integer() and not isinstance(v, float):
+                txt = f"{int(f)}"
+            else:
+                txt = f"{f:.4g}"
+            lines.append(f"  {k}: {txt}")
+    tip = "Computation time of the last generation, per stage"
+    return total, tip + ("\n" + "\n".join(lines) if lines else "")
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, project: Optional[Project] = None, parent=None):
         super().__init__(parent)
@@ -103,6 +168,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # (tests, scripted use): "generate" (with a visible warning), "repair" or "cancel"
         self.broken_mesh_choice = "generate"
         self._generate_after_repair: Optional[bool] = None
+        self.last_orca: Optional[dict] = None
         self.setWindowTitle("ArborFDM")
         self.resize(1500, 920)
 
@@ -204,6 +270,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.preset_menu.addSeparator() if a is None else self.preset_menu.addAction(a)
         self.left.set_preset_actions(self.act_preset_save, self.preset_menu)
         self.right.set_preset_actions(self.act_preset_save)
+        # contact editing (all undoable, through the Project)
+        self.act_delete_contact = self._action(
+            "Delete selected contact", self.delete_selected_contact, icons.clear(),
+            K.Delete, "Delete the selected contact (Del)")
+        self.act_deselect = self._action("Deselect contact", self.deselect_contact, None, "Esc",
+                                         "Clear the contact selection (Esc)")
+        self.act_delete_manual = self._action(
+            "Delete all manual contacts", self.delete_manual_contacts, None, None,
+            "Remove every contact placed by hand (one undoable step)")
+        self.act_delete_reason = self._action(
+            "Delete contacts of this reason", self.delete_selected_reason, None, None,
+            "Remove every contact with the same reason as the selected one (one undoable step)")
+        self.contacts_menu = QtWidgets.QMenu("Contacts", self)
+        for a in (self.act_delete_contact, self.act_deselect, None, self.act_delete_reason,
+                  self.act_delete_manual):
+            self.contacts_menu.addSeparator() if a is None else self.contacts_menu.addAction(a)
+        self.right.contact_editor.set_bulk_menu(self.contacts_menu)
         self.act_overhang_auto = self._action(
             "Overhang colors: automatic", lambda: self.view.set_overhang_choice(None), None, None,
             "Overhang colours on while no support is generated, off afterwards")
@@ -260,6 +343,10 @@ class MainWindow(QtWidgets.QMainWindow):
         m = mb.addMenu("&Edit")
         m.addAction(self.act_undo)
         m.addAction(self.act_redo)
+        m.addSeparator()
+        for a in (self.act_delete_contact, self.act_deselect, self.act_delete_reason,
+                  self.act_delete_manual):
+            m.addAction(a)
         m = mb.addMenu("&Supports")
         for a in (self.act_generate, self.act_rebuild, self.act_clear, self.act_cancel):
             m.addAction(a)
@@ -312,6 +399,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vp.contactAddRequested.connect(self._on_add_contact)
         vp.contactRemoveRequested.connect(self.project.remove_contact)
         vp.contactSelected.connect(self.project.select_contact)
+        vp.hoverTargetChanged.connect(self._refresh_inspect)
         self.runner.progress.connect(self._on_progress)
         self.runner.running_changed.connect(self._on_running_changed)
         self.runner.finished.connect(self._on_task_finished)
@@ -350,6 +438,7 @@ class MainWindow(QtWidgets.QMainWindow):
             txt += f" ({nm} manual" + (f", {nd} disabled" if nd else "") + ")"
         self.contacts_label.setText(txt)
         self._refresh_actions()
+        self._refresh_inspect()
 
     def _refresh_result(self) -> None:
         r = self.project.result
@@ -368,9 +457,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tree_label.setText(f"Trees: {st['trees']}  Junctions: {st['junctions']}  "
                                     f"Feet: {st['feet']}" + (f" (+{st['model_feet']} on model)"
                                                              if st.get("model_feet") else ""))
-            total = sum(r.timings.values()) if r.timings else 0.0
-            self.time_label.setText(f"Time: {total:.2f} s")
-            self.time_label.setToolTip("\n".join(f"{k}: {v:.3f} s" for k, v in r.timings.items()))
+            total, tip = format_timings(r.timings, getattr(r, "stats", None))
+            self.time_label.setText(f"Time: {total:.2f} s" if total is not None else "Time: -")
+            self.time_label.setToolTip(tip)
             ne, nw = len(r.errors), len(r.warnings)
             self.issues_label.setText(f"Errors: {ne}  Warnings: {nw}")
             self.issues_label.setStyleSheet(f"color: {theme.ERROR};" if ne else
@@ -400,6 +489,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_new.setEnabled(not busy)
         self.act_open.setEnabled(not busy)
         self.act_cancel.setEnabled(busy)
+        sel = p.contact(p.selected_contact_id) if p.selected_contact_id is not None else None
+        # contact edits stay possible during a computation (QA-3); Esc cancels it first
+        self.act_delete_contact.setEnabled(sel is not None)
+        self.act_deselect.setEnabled(sel is not None and not busy)
+        nm = len(p.manual_contacts())
+        self.act_delete_manual.setEnabled(nm > 0)
+        self.act_delete_manual.setText(f"Delete all manual contacts ({nm})" if nm else
+                                       "Delete all manual contacts")
+        if sel is not None:
+            from .theme import REASON_STYLE
+            label = REASON_STYLE.get(sel.reason.value, (sel.reason.value,))[0]
+            n = len(p.contacts_with_reason(sel.reason))
+            self.act_delete_reason.setText(f"Delete all '{label}' contacts ({n})")
+            self.act_delete_reason.setEnabled(True)
+        else:
+            self.act_delete_reason.setText("Delete contacts of this reason")
+            self.act_delete_reason.setEnabled(False)
         # QA-3: the model (transform, repair, import) is locked while a task runs; contact
         # and parameter edits stay possible and mark the result out of date when it arrives
         self.left.set_busy(busy)
@@ -472,6 +578,8 @@ class MainWindow(QtWidgets.QMainWindow):
         elif ev == "selection":
             self.viewport.set_selected(self.project.selected_contact_id)
             self.right.contact_editor.refresh()
+            self._refresh_actions()
+            self._refresh_inspect()
             if self.project.selected_contact_id is not None:
                 self.right.tabs.setCurrentIndex(1)
         elif ev == "result":
@@ -721,18 +829,189 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message(f"Presets folder: {d}")
 
     # ------------------------------------------------------------------ slicer, preferences
-    def open_in_orca(self) -> None:
-        """Placeholder: replaced by the OrcaSlicer launch (arbor/io/slicer_launch.py)."""
-        self.message("Open in OrcaSlicer: not available yet", warning=True)
-        self._info("Open in OrcaSlicer", "Opening the result in OrcaSlicer is not available yet.\n"
-                   "Use Export > 3MF for Orca / Bambu: separate objects, then open the file "
-                   "in OrcaSlicer.")
+    def _stale_export_warnings(self) -> list[str]:
+        p = self.project
+        r = p.result
+        out = []
+        if r is not None and p.contacts_edited:
+            out.append("Contacts were edited since the last generation: the file does not "
+                       "include these edits (use Rebuild branches, then export again).")
+        changed = p.result_param_changes() if r is not None else {}
+        if changed:
+            out.append("Parameters changed since the supports were generated ("
+                       + ", ".join(f"{k} {a} -> {b}" for k, (a, b) in changed.items())
+                       + "): the file holds the supports as generated, with the "
+                       "parameters really used; generate again to apply the new values.")
+        return out
+
+    def open_in_orca(self) -> bool:
+        """Export model + supports (+ raft) as a 3MF in the to_slicer folder (worker thread),
+        then open it in OrcaSlicer (see _orca_exported)."""
+        p = self.project
+        if not p.has_model or self.runner.is_running():
+            return False
+        r = p.result
+        if r is None:
+            self.message("Generate supports first", error=True)
+            return False
+        warnings = self._stale_export_warnings()
+        if warnings:
+            self.message(" ".join(warnings), warning=True)
+        base = (p.name or "model").rsplit(".", 1)[0]
+        params = p.export_params()      # the parameters that built the geometry
+        self.last_orca = {"file": None, "exe": None, "opened": False, "error": "",
+                          "folder_opened": False}
+        return self._start(_task_orca_export,
+                           {"model": p.mesh.copy(), "supports": r.support_mesh,
+                            "raft": r.raft_mesh, "params": params, "name": base},
+                           ("orca", warnings, params), "Exporting for OrcaSlicer")
+
+    def find_orca(self):
+        """OrcaSlicer executable: the path of the preferences if valid, else automatic
+        detection; None if not found."""
+        from arbor.io import slicer_launch as sl
+        from .preferences import configured_orca_path
+        return sl.find_orcaslicer(configured_orca_path())
+
+    def _orca_exported(self, result, context) -> None:
+        path, notes = result
+        warnings = context[1] if len(context) > 1 else []
+        pp = context[2] if len(context) > 2 else self.project.params
+        info = getattr(self, "last_orca", None) or {}
+        self.last_orca = info
+        info.update(file=str(path), notes=list(notes or []), warnings=list(warnings))
+        exe = self.find_orca()
+        while True:
+            if exe is None:
+                choice = self._ask_orca_missing(path, "OrcaSlicer was not found on this "
+                                                "computer.")
+                exe = self._resolve_orca_choice(choice, path)
+                if exe is None:
+                    return
+            if self._launch_orca(path, exe, pp, warnings, notes):
+                return
+            # launch failed: same choices (another program, preferences, folder)
+            choice = self._ask_orca_missing(path, info.get("error", ""), failed=True)
+            exe = self._resolve_orca_choice(choice, path)
+            if exe is None:
+                return
+
+    def _resolve_orca_choice(self, choice: str, path):
+        """Apply the user's choice in the missing-OrcaSlicer dialog; the executable to
+        launch, or None (stop)."""
+        if choice == "choose":
+            exe = self.choose_orca_exe()
+            if exe is None:
+                self.message(f"Not opened in OrcaSlicer. The file is in {path}", warning=True)
+            return exe
+        if choice == "preferences":
+            self.open_preferences()
+            exe = self.find_orca()
+            if exe is None:
+                self.message(f"OrcaSlicer still not found. The file is in {path}", warning=True)
+            return exe
+        if choice == "folder":
+            self.open_orca_folder(path)
+        self.message(f"Not opened in OrcaSlicer. The file is in {path}", warning=True)
+        return None
+
+    def choose_orca_exe(self):
+        """Ask for the OrcaSlicer program, check it and remember it (settings orca_path)."""
+        from arbor.core.settings import SettingsError, update_settings
+        from arbor.io import slicer_launch as sl
+        from .preferences import orca_file_filter
+        exe = self._ask_path(False, "Choose OrcaSlicer (orca-slicer.exe)", orca_file_filter())
+        if not exe:
+            return None
+        why = sl.check_orca_path(exe)
+        if why is not None:
+            self.message(f"Not an OrcaSlicer program: {why}", error=True)
+            self._info("Invalid OrcaSlicer path", f"{exe}\n\n{why}")
+            return None
+        try:
+            update_settings(orca_path=str(exe))
+        except SettingsError as exc:
+            self.message(f"OrcaSlicer path not saved: {exc}", warning=True)
+        dlg = getattr(self, "_preferences_dialog", None)
+        if dlg is not None:
+            dlg.load()
+        return Path(exe)
+
+    def open_orca_folder(self, path) -> None:
+        folder = Path(path).parent
+        if getattr(self, "last_orca", None) is not None:
+            self.last_orca["folder_opened"] = True
+        if not QtCore.QCoreApplication.instance().property("arbor_no_dialogs"):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
+
+    def orca_missing_box(self, path, reason: str, failed: bool = False) -> QtWidgets.QMessageBox:
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("OrcaSlicer could not be opened" if failed else "OrcaSlicer not found")
+        box.setText(("OrcaSlicer could not be started." if failed else
+                     "ArborFDM could not find OrcaSlicer.")
+                    + "\nThe model and its supports were exported anyway.")
+        box.setInformativeText(
+            (f"{reason}\n\n" if reason else "")
+            + f"File: {path}\n\nChoose the OrcaSlicer program (orca-slicer.exe), set it in "
+            "Preferences, or open the file yourself from its folder.")
+        box.choose_button = box.addButton("Choose the executable...",
+                                          QtWidgets.QMessageBox.AcceptRole)
+        box.preferences_button = box.addButton("Preferences...", QtWidgets.QMessageBox.ActionRole)
+        box.folder_button = box.addButton("Open folder", QtWidgets.QMessageBox.ActionRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.setDefaultButton(box.choose_button)
+        return box
+
+    def _ask_orca_missing(self, path, reason: str, failed: bool = False) -> str:
+        """"choose", "preferences", "folder" or "cancel"."""
+        hook = getattr(self, "orca_choice_provider", None)      # tests answer here
+        if hook is not None:
+            return hook(str(path), reason) or "cancel"
+        if QtCore.QCoreApplication.instance().property("arbor_no_dialogs"):
+            self.last_info = ("OrcaSlicer not found", f"{reason}\n{path}")
+            return "cancel"
+        box = self.orca_missing_box(path, reason, failed)
+        box.exec()
+        b = box.clickedButton()
+        return {box.choose_button: "choose", box.preferences_button: "preferences",
+                box.folder_button: "folder"}.get(b, "cancel")
+
+    def _launch_orca(self, path, exe, pp, warnings, notes) -> bool:
+        """Start OrcaSlicer on the file; True if started (a reminder is shown)."""
+        from arbor.io import slicer_launch as sl
+        info = self.last_orca
+        info["exe"] = str(exe)
+        try:
+            sl.launch_orcaslicer(path, exe)
+        except (sl.SlicerNotFound, sl.SlicerLaunchError) as exc:
+            info["error"] = str(exc)
+            self.message(f"OrcaSlicer: {exc}", error=True)
+            return False
+        info["opened"] = True
+        info["error"] = ""
+        if warnings:
+            self.message(f"Opening {Path(path).name} in OrcaSlicer. WARNING: "
+                         + " ".join(warnings), warning=True)
+        else:
+            self.message(f"Opening {Path(path).name} in OrcaSlicer ({exe})")
+        text = ORCA_REMINDER.format(layer=pp.layer_height, walls=pp.walls)
+        if warnings:
+            text = "WARNING:\n" + "\n".join(f"  - {w}" for w in warnings) + "\n\n" + text
+        if notes:
+            text += "\n\nNotes:\n" + "\n".join(f"  - {n}" for n in notes)
+        self._info("Opening in OrcaSlicer",
+                   f"OrcaSlicer is starting with:\n{path}\n\n{text}")
+        return True
 
     def preferences_dialog(self) -> PreferencesDialog:
         """The preferences dialog (created once, kept: its fields keep their state)."""
         dlg = getattr(self, "_preferences_dialog", None)
         if dlg is None:
             dlg = self._preferences_dialog = PreferencesDialog(self)
+            dlg.orcaPathChanged.connect(
+                lambda path: self.message(f"OrcaSlicer path saved: {path}" if path else
+                                          "OrcaSlicer: automatic detection"))
         return dlg
 
     def open_preferences(self) -> None:
@@ -749,6 +1028,85 @@ class MainWindow(QtWidgets.QMainWindow):
     def redo(self) -> None:
         if not self.runner.is_running():
             self.project.redo()
+
+    def delete_selected_contact(self) -> bool:
+        cid = self.project.selected_contact_id
+        if cid is None or not self.project.remove_contact(cid):
+            return False
+        self.message(f"Contact #{cid} deleted (undoable). Use Rebuild branches to update the "
+                     "trees.")
+        return True
+
+    def deselect_contact(self) -> None:
+        self.project.select_contact(None)
+
+    def delete_manual_contacts(self) -> int:
+        n = self.project.remove_manual_contacts()
+        if n:
+            self.message(f"{n} manual contact(s) deleted (undoable). Use Rebuild branches to "
+                         "update the trees.")
+        return n
+
+    def delete_selected_reason(self) -> int:
+        p = self.project
+        sel = p.contact(p.selected_contact_id) if p.selected_contact_id is not None else None
+        if sel is None:
+            return 0
+        from .theme import REASON_STYLE
+        label = REASON_STYLE.get(sel.reason.value, (sel.reason.value,))[0]
+        n = p.remove_contacts_with_reason(sel.reason)
+        if n:
+            self.message(f"{n} '{label}' contact(s) deleted (undoable). Use Rebuild branches to "
+                         "update the trees.")
+        return n
+
+    def inspect_html(self) -> str:
+        """Text of the info card over the view: the hovered contact or issue marker, else
+        the selected contact (reason, state, position, note)."""
+        from .theme import REASON_STYLE
+        p, vp = self.project, self.viewport
+        cid = vp.hovered_contact_id
+        hovered = cid is not None and p.contact(cid) is not None
+        if not hovered and vp.hovered_issue is not None and 0 <= vp.hovered_issue < len(vp.issues):
+            i = vp.issues[vp.hovered_issue]
+            sev = issue_severity(i)
+            col = {"error": theme.ERROR, "warning": theme.WARNING}.get(sev, theme.TEXT_DIM)
+            code = str(getattr(i, "code", "") or "")
+            return (f"<span style='color:{col}'>&#9679;</span>&nbsp;<b style='color:"
+                    f"{theme.TEXT_STRONG}'>{_esc(issue_title(code))}</b>"
+                    f"&nbsp;<span style='color:{theme.TEXT_DIM}'>{sev} [{_esc(code)}]</span>"
+                    f"<br>{_esc(issue_text(i))}")
+        if not hovered:
+            cid = p.selected_contact_id
+        c = p.contact(cid) if cid is not None else None
+        if c is None:
+            return ""
+        label, col = REASON_STYLE.get(c.reason.value, (c.reason.value, theme.TEXT))
+        state = []
+        if c.manual:
+            state.append("manual")
+        if not c.enabled:
+            state.append("disabled")
+        if c.tip_diameter is not None:
+            state.append(f"tip {c.tip_diameter:.2f} mm")
+        kind = "Hovered" if hovered and cid != p.selected_contact_id else "Selected"
+        pos = c.position
+        html = (f"<span style='color:{theme.TEXT_DIM}'>{kind}</span>&nbsp;&nbsp;"
+                f"<span style='color:{col}'>&#9679;</span>&nbsp;<b style='color:"
+                f"{theme.TEXT_STRONG}'>#{c.id} {_esc(label)}</b>"
+                + (f"&nbsp;&middot;&nbsp;{', '.join(state)}" if state else "")
+                + f"&nbsp;&middot;&nbsp;<span style='color:{theme.TEXT_DIM}'>z {pos[2]:.2f} mm"
+                  "</span>")
+        if c.note:
+            html += f"<br><span style='color:{theme.TEXT}'>{_esc(c.note)}</span>"
+        if kind == "Selected":
+            html += (f"<br><span style='color:{theme.TEXT_DIM}'>Del: delete&nbsp;&nbsp;&middot;"
+                     "&nbsp;&nbsp;Esc: deselect&nbsp;&nbsp;&middot;&nbsp;&nbsp;Right click: "
+                     "delete</span>")
+        return html
+
+    def _refresh_inspect(self) -> None:
+        self.view.set_info(self.inspect_html() if self.project.has_model else "")
 
     def _on_add_contact(self, position, normal) -> None:
         c = self.project.add_manual_contact(position, normal)
@@ -880,16 +1238,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if r is None and kind != "stl_all" and kind != "3mf":
             self.message("Generate supports first", error=True)
             return
-        warnings = []
-        if r is not None and p.contacts_edited:
-            warnings.append("Contacts were edited since the last generation: the file does not "
-                            "include these edits (use Rebuild branches, then export again).")
-        changed = p.result_param_changes() if r is not None else {}
-        if changed:
-            warnings.append("Parameters changed since the supports were generated ("
-                            + ", ".join(f"{k} {a} -> {b}" for k, (a, b) in changed.items())
-                            + "): the file holds the supports as generated, with the "
-                            "parameters really used; generate again to apply the new values.")
+        warnings = self._stale_export_warnings()
         if warnings:
             self.message(" ".join(warnings), warning=True)
         base = (p.name or "model").rsplit(".", 1)[0]
@@ -942,6 +1291,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message(f"{self.runner.label or kind} failed: {message}", error=True)
         if kind in ("load", "open_project"):
             self._info("Cannot open file", message)
+        elif kind == "orca":
+            if getattr(self, "last_orca", None) is not None:
+                self.last_orca["error"] = message
+            self._info("Open in OrcaSlicer", f"The file for OrcaSlicer could not be written:\n"
+                       f"{message}\n\nNothing was opened; the model and the project are "
+                       "unchanged.")
 
     def _on_task_cancelled(self, context) -> None:
         self._generate_after_repair = None
@@ -1046,6 +1401,8 @@ class MainWindow(QtWidgets.QMainWindow):
                          warning=bool(notes))
             self._refresh_banner()
             self.right.tabs.setCurrentIndex(1 if result.issues else self.right.tabs.currentIndex())
+        elif kind == "orca":
+            self._orca_exported(result, context)
         elif kind == "export":
             problems = result or []
             path = context[1]

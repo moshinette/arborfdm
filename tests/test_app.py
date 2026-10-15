@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -60,6 +61,9 @@ def window(app, monkeypatch, tmp_path):
     from arbor.app import main_window as mw
     # user presets go to a private folder (never the real user folder)
     monkeypatch.setenv("ARBOR_USER_PRESET_DIR", str(tmp_path / "user_presets"))
+    # settings (OrcaSlicer path) and files sent to the slicer: private folders too
+    monkeypatch.setenv("ARBOR_USER_CONFIG_DIR", str(tmp_path / "user_config"))
+    monkeypatch.setenv("ARBOR_TO_SLICER_DIR", str(tmp_path / "to_slicer"))
     if not _engine_ok():
         monkeypatch.setattr(mw, "run_generation", _stand_in)
     w = mw.MainWindow()
@@ -734,9 +738,13 @@ def test_export_3mf_separate_objects(app, window, tmp_path):
     assert xml.count("<item ") == 2
 
 
-def test_open_in_orca_and_preferences_entries(app, window, stl_path):
-    """Places reserved for the OrcaSlicer launch: Export menu + toolbar button (enabled only
-    with supports) and File > Preferences... opening a dialog with a "Slicers" section."""
+def test_open_in_orca_and_preferences_entries(app, window, stl_path, monkeypatch, tmp_path):
+    """Export menu + toolbar button (enabled only with supports) and File > Preferences...
+    opening a dialog with a "Slicers" section."""
+    from arbor.io import slicer_launch as sl
+    monkeypatch.setattr(sl, "candidate_paths", lambda *a, **k: [])
+    launched = []
+    monkeypatch.setattr(sl, "launch_orcaslicer", lambda f, e, **k: launched.append((f, e)))
     a = window.act_open_orca
     assert a.text() == "Open in OrcaSlicer"
     assert a in window.export_menu.actions() and a in window.toolbar.actions()
@@ -752,8 +760,11 @@ def test_open_in_orca_and_preferences_entries(app, window, stl_path):
     assert not a.isEnabled()                       # locked while computing
     wait_for(app, window, timeout=300)
     assert a.isEnabled()
-    a.trigger()
-    assert "not available yet" in window.status_msg.text()
+    a.trigger()                                    # Orca not found: dialog answered "cancel"
+    wait_for(app, window)
+    assert launched == []
+    assert window.last_orca["file"] and not window.last_orca["opened"]
+    assert window.last_orca["file"] in window.status_msg.text()
     file_menu = window.menuBar().actions()[0].menu()
     assert window.act_preferences in file_menu.actions()
     window.act_preferences.trigger()
@@ -761,6 +772,314 @@ def test_open_in_orca_and_preferences_entries(app, window, stl_path):
     dlg = window.preferences_dialog()
     assert isinstance(dlg, PreferencesDialog) and dlg.slicers_group.title() == "Slicers"
     assert dlg.sections["Slicers"] is dlg.slicers_form
+
+
+def _fake_orca(tmp_path, name="orca-slicer"):
+    """An executable file that is never run (launch_orcaslicer is monkeypatched)."""
+    import sys
+    exe = tmp_path / "fake_orca" / (name + (".exe" if sys.platform.startswith("win") else ""))
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    return exe
+
+
+def _generated(app, window, stl_path):
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    assert window.generate_full()
+    wait_for(app, window, timeout=300)
+    assert window.project.result is not None, window.last_error
+
+
+def test_open_in_orca_exports_in_worker_and_launches(app, window, stl_path, monkeypatch, tmp_path):
+    import zipfile
+    from arbor.core.settings import update_settings
+    from arbor.io import slicer_launch as sl
+    exe = _fake_orca(tmp_path)
+    update_settings(orca_path=str(exe))
+    launched, threads = [], []
+    monkeypatch.setattr(sl, "launch_orcaslicer", lambda f, e, **k: launched.append((f, e)))
+    real_export = sl.export_for_slicer
+
+    def spy(*a, **k):
+        threads.append(QtCore.QThread.currentThread())
+        return real_export(*a, **k)
+    monkeypatch.setattr(sl, "export_for_slicer", spy)
+    src_bytes = stl_path.read_bytes()
+    _generated(app, window, stl_path)
+    window.project.set_param("contact_density", 1.7)   # after generation: not in the file
+    used = window.project.export_params()
+    assert window.open_in_orca()
+    assert window.runner.is_running()                     # export runs in the worker
+    wait_for(app, window)
+    assert threads and threads[0] is not app.thread()
+    assert len(launched) == 1
+    f, e = launched[0]
+    assert Path(e) == exe and Path(f).parent == tmp_path / "to_slicer"
+    assert Path(f).suffix == ".3mf" and Path(f).exists()
+    assert stl_path.read_bytes() == src_bytes             # source model untouched
+    with zipfile.ZipFile(f) as z:
+        cfg = z.read("Metadata/model_settings.config").decode()
+        xml = z.read("3D/3dmodel.model").decode()
+    assert 'key="enable_support" value="0"' in cfg
+    assert f'{used.contact_density}' in xml or "contact_density" in xml
+    assert window.last_orca["opened"] and window.last_orca["exe"] == str(exe)
+    title, text = window.last_info
+    assert title == "Opening in OrcaSlicer" and "supports disabled" in text
+    assert "contact_density" in text                      # stale-parameter warning kept
+    # a second launch never overwrites the first file
+    assert window.open_in_orca()
+    wait_for(app, window)
+    assert len(launched) == 2 and launched[1][0] != launched[0][0]
+    assert Path(launched[0][0]).exists()
+
+
+def test_open_in_orca_not_found_choose_executable(app, window, stl_path, monkeypatch, tmp_path):
+    from arbor.core.settings import load_settings
+    from arbor.io import slicer_launch as sl
+    monkeypatch.setattr(sl, "candidate_paths", lambda *a, **k: [])
+    launched, asked = [], []
+    monkeypatch.setattr(sl, "launch_orcaslicer", lambda f, e, **k: launched.append((f, e)))
+    exe = _fake_orca(tmp_path)
+    _generated(app, window, stl_path)
+    # 1. an invalid program is refused (nothing saved, nothing launched)
+    window.orca_choice_provider = lambda path, reason: asked.append((path, reason)) or "choose"
+    window.path_provider = lambda save, cap, filt, default: str(tmp_path)
+    window.open_in_orca()
+    wait_for(app, window)
+    assert launched == [] and len(asked) == 1 and "not found" in asked[0][1]
+    assert load_settings()["orca_path"] is None
+    assert window.last_info[0] == "Invalid OrcaSlicer path"
+    # 2. a valid program is remembered and launched
+    window.path_provider = lambda save, cap, filt, default: str(exe)
+    window.open_in_orca()
+    wait_for(app, window)
+    assert len(launched) == 1 and Path(launched[0][1]) == exe
+    assert load_settings()["orca_path"] == str(exe)
+    # 3. next time it is found without asking
+    asked.clear()
+    window.open_in_orca()
+    wait_for(app, window)
+    assert asked == [] and len(launched) == 2
+
+
+def test_open_in_orca_not_found_open_folder_and_launch_error(app, window, stl_path, monkeypatch,
+                                                              tmp_path):
+    from arbor.core.settings import update_settings
+    from arbor.io import slicer_launch as sl
+    monkeypatch.setattr(sl, "candidate_paths", lambda *a, **k: [])
+    _generated(app, window, stl_path)
+    window.orca_choice_provider = lambda path, reason: "folder"
+    window.open_in_orca()
+    wait_for(app, window)
+    info = window.last_orca
+    assert info["folder_opened"] and not info["opened"] and Path(info["file"]).exists()
+    assert info["file"] in window.status_msg.text()
+    # the program exists but fails to start: the user is told why and can choose again
+    exe = _fake_orca(tmp_path)
+    update_settings(orca_path=str(exe))
+
+    def boom(f, e, **k):
+        raise sl.SlicerLaunchError("orca-slicer exited immediately with code 1")
+    monkeypatch.setattr(sl, "launch_orcaslicer", boom)
+    reasons = []
+    window.orca_choice_provider = lambda path, reason: reasons.append(reason) or "cancel"
+    window.open_in_orca()
+    wait_for(app, window)
+    assert reasons and "exited immediately" in reasons[0]
+    assert not window.last_orca["opened"] and "exited immediately" in window.last_orca["error"]
+    # the dialog itself: the three choices + Cancel
+    box = window.orca_missing_box("/x/model.3mf", "not found")
+    texts = [b.text() for b in box.buttons()]
+    assert "Choose the executable..." in texts and "Preferences..." in texts
+    assert "Open folder" in texts and "/x/model.3mf" in box.informativeText()
+    box.deleteLater()
+
+
+def test_open_in_orca_export_failure_is_reported(app, window, stl_path, monkeypatch):
+    from arbor.io import slicer_launch as sl
+
+    def fail(*a, **k):
+        raise sl.SlicerExportError("cannot create the folder X: denied")
+    monkeypatch.setattr(sl, "export_for_slicer", fail)
+    launched = []
+    monkeypatch.setattr(sl, "launch_orcaslicer", lambda f, e, **k: launched.append(f))
+    _generated(app, window, stl_path)
+    window.open_in_orca()
+    wait_for(app, window)
+    assert launched == [] and "denied" in window.status_msg.text()
+    assert window.last_info[0] == "Open in OrcaSlicer" and "denied" in window.last_info[1]
+
+
+def test_preferences_orca_path(app, window, monkeypatch, tmp_path):
+    from arbor.core.settings import load_settings
+    from arbor.io import slicer_launch as sl
+    monkeypatch.setattr(sl, "candidate_paths", lambda *a, **k: [])
+    dlg = window.preferences_dialog()
+    dlg.load()
+    assert dlg.orca_edit.text() == "" and dlg.orca_valid is False
+    assert "not found" in dlg.orca_status.text()
+    assert not dlg.set_orca_path(str(tmp_path / "missing.exe"))
+    assert dlg.orca_valid is False and "not saved" in dlg.orca_status.text()
+    assert load_settings()["orca_path"] is None
+    exe = _fake_orca(tmp_path)
+    seen = []
+    dlg.orcaPathChanged.connect(seen.append)
+    window.path_provider = lambda save, cap, filt, default: str(exe)
+    dlg.orca_browse.click()
+    assert dlg.orca_valid is True and dlg.orca_edit.text() == str(exe)
+    assert load_settings()["orca_path"] == str(exe) and seen == [str(exe)]
+    assert "OrcaSlicer path saved" in window.status_msg.text()
+    assert dlg.set_orca_path("")                          # back to automatic detection
+    assert load_settings()["orca_path"] is None and seen[-1] is None
+
+
+def test_contact_keyboard_and_bulk_delete(app, window, stl_path):
+    from PySide6.QtTest import QTest
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    p = window.project
+    vp = window.viewport
+    for x in (6.0, 8.0, 10.0):
+        vp.contactAddRequested.emit(np.array([x, 0.0, 9.0]), np.array([0.0, 0.0, -1.0]))
+    assert len(p.manual_contacts()) == 3
+    sel = p.selected_contact_id
+    assert window.act_delete_contact.isEnabled() and window.act_deselect.isEnabled()
+    assert window.act_delete_manual.text() == "Delete all manual contacts (3)"
+    assert window.act_delete_reason.text() == "Delete all 'Manual' contacts (3)"
+    # the info card describes the selected contact: reason and note
+    html = window.view.info_card.text()
+    assert window.view.info_card.isVisibleTo(window)
+    assert f"#{sel} Manual" in html and "Placed by the user" in html
+    # Esc deselects, Del deletes the selection (keyboard shortcuts of the window)
+    window.activateWindow()
+    vp.setFocus()
+    app.processEvents()
+    QTest.keyClick(vp, QtCore.Qt.Key_Escape)
+    app.processEvents()
+    assert p.selected_contact_id is None and not window.view.info_card.isVisibleTo(window)
+    p.select_contact(sel)
+    QTest.keyClick(vp, QtCore.Qt.Key_Delete)
+    app.processEvents()
+    assert p.contact(sel) is None and len(p.contacts) == 2
+    window.undo()
+    assert p.contact(sel) is not None
+    # Delete in a parameter field edits the field, never deletes the contact
+    p.select_contact(sel)
+    spin = window.right.fields["tip_diameter"].widget
+    spin.setFocus()
+    app.processEvents()
+    QTest.keyClick(spin, QtCore.Qt.Key_Delete)
+    app.processEvents()
+    assert p.contact(sel) is not None
+    # bulk deletes: one undo step each
+    assert window.delete_selected_reason() == 3 and p.contacts == []
+    window.undo()
+    assert len(p.contacts) == 3 and [c.id for c in p.contacts] == sorted(c.id for c in p.contacts)
+    assert window.delete_manual_contacts() == 3 and p.contacts == []
+    assert not window.act_delete_manual.isEnabled()
+    window.undo()
+    assert len(p.manual_contacts()) == 3
+    window.redo()
+    assert p.contacts == []
+
+
+def test_bulk_delete_keeps_automatic_contacts(app):
+    from arbor.core.project import Project
+    from arbor.engine.types import Contact, ContactReason
+    p = Project()
+    p.contacts = [Contact(1, np.zeros(3), np.array([0, 0, -1.0]), ContactReason.EDGE),
+                  Contact(2, np.ones(3), np.array([0, 0, -1.0]), ContactReason.ISLAND)]
+    m = p.add_manual_contact([1, 2, 3], [0, 0, -1])
+    p.select_contact(m.id)
+    assert p.remove_manual_contacts() == 1
+    assert [c.id for c in p.contacts] == [1, 2] and p.selected_contact_id is None
+    assert p.remove_contacts_with_reason("edge") == 1 and [c.id for c in p.contacts] == [2]
+    assert p.undo_stack.undo_text() == "Remove edge contacts"
+    p.undo()
+    assert [c.id for c in p.contacts] == [1, 2]
+    p.undo()
+    assert [c.id for c in p.contacts] == [1, 2, m.id]
+    assert p.remove_contacts([]) == 0 and p.remove_contacts([99]) == 0
+
+
+def test_issue_list_groups_and_unknown_codes(app):
+    from types import SimpleNamespace
+    from arbor.app.panels import RightPanel, issue_title
+    from arbor.core.project import Project
+    from arbor.engine.types import Issue
+    issues = [Issue("warning", "fragile_support", f"Thin branch {k}", np.array([k, 0, 5.0]))
+              for k in range(9)]
+    issues += [Issue("error", "unrouted_contact", "Contact #3 not connected", None, 3),
+               Issue("warning", "brand_new_check", "", np.array([1.0, 2.0, 3.0])),
+               SimpleNamespace(severity="critical", code="odd", message="Strange",
+                               position=[np.nan, 0, 0], contact_id=None),
+               Issue("info", "hard_to_remove", "Hard to remove near the chin",
+                     np.array([0, 1.0, 4.0]))]
+    rp = RightPanel(Project())
+    rp.set_issues(issues, True)
+    L = rp.issue_list
+    texts = [L.item(k).text() for k in range(L.count())]
+    assert texts[0] == "Contact #3 not connected"            # errors first
+    header = next(L.item(k) for k in range(L.count())
+                  if L.item(k).data(rp.GROUP_ROLE) == "fragile_support")
+    assert "Fragile support" in header.text() and "\u00d7 9" in header.text()
+    children = [L.item(k) for k in range(L.count())
+                if (L.item(k).data(QtCore.Qt.UserRole) or 0) < 9
+                and L.item(k).data(rp.GROUP_ROLE) is None
+                and L.item(k).text().strip().startswith("Thin branch")]
+    assert len(children) == 9 and all(c.isHidden() for c in children)
+    rp._on_issue(header)                                     # click: expand
+    assert not any(c.isHidden() for c in children) and "\u25be" in header.text()
+    rp.set_issues(issues, True)                              # stays open after a refresh
+    assert any("\u25be" in L.item(k).text() for k in range(L.count()))
+    assert "Brand new check" in texts                        # empty message: readable code
+    assert issue_title("brand_new_check") == "Brand new check"
+    strange = next(L.item(k) for k in range(L.count()) if L.item(k).text() == "Strange")
+    assert strange.toolTip().startswith("Warning")           # unknown severity: as warning
+    assert "<b>11</b> warning" in rp.issue_summary.text()      # unknown severity counted
+    assert rp.tabs.tabText(1) == "Contacts and issues (12)"
+    seen = []
+    rp.issueActivated.connect(seen.append)
+    third = next(L.item(k) for k in range(L.count()) if L.item(k).text().strip() == "Thin branch 2")
+    rp._on_issue(third)
+    assert seen and seen[0] is issues[2]
+    # few issues of one code: no group (QA-7 behaviour kept)
+    rp.set_issues(issues[:3], True)
+    assert L.count() == 3 and all(L.item(k).data(rp.GROUP_ROLE) is None for k in range(3))
+
+
+def test_viewport_shows_any_issue_code(app, window, stl_path):
+    from types import SimpleNamespace
+    from arbor.engine.types import Issue
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    vp = window.viewport
+    issues = [Issue("warning", "fragile_support", "Thin branch", np.array([0, 0, 5.0])),
+              Issue("info", "some_future_code", "", np.array([1.0, 0, 5.0])),
+              SimpleNamespace(severity="?", code="x", message="m", position="bad",
+                              contact_id=None),
+              Issue("error", "unsupported_region", "Hole", np.array([[2.0, 0, 5.0]]))]
+    vp.set_issues(issues)                                     # no exception
+    assert [k for k, _ in vp._visible_issue_points()] == [0, 1, 3]
+    vp.hovered_issue = 1
+    html = window.inspect_html()
+    assert "Some future code" in html and "some_future_code" in html
+    vp.hovered_issue = None
+
+
+def test_format_timings_keeps_statistics_out_of_the_time():
+    from arbor.app.main_window import format_timings
+    total, tip = format_timings({"analysis": 0.5, "tree": 0.25, "fragile_supports": 3,
+                                 "min_branch_mm": 0.42, "label": "x"})
+    assert total == pytest.approx(0.75)
+    assert "analysis: 0.500 s" in tip and "fragile_supports: 3" in tip
+    assert "min_branch_mm: 0.42" in tip and "label: x" in tip
+    assert format_timings({"total": 0.01})[0] == pytest.approx(0.01)
+    assert format_timings({})[0] is None
+    total, tip = format_timings({"tree": 1.0}, {"n_trees": 7, "nested": {"a": 1}})
+    assert total == 1.0 and "n_trees: 7" in tip and "nested" not in tip
 
 
 def test_busy_card_and_empty_state(app, window, monkeypatch, stl_path):

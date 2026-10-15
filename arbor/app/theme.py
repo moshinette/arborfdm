@@ -78,6 +78,7 @@ RAFT_COLOR = (0.13, 0.50, 0.47, 1.0)
 GHOST_COLOR = (0.95, 0.95, 1.0, 0.45)
 UNSUPPORTED_COLOR = (1.0, 0.18, 0.15, 1.0)
 WARNING_MARK_COLOR = (1.0, 0.62, 0.10, 1.0)
+INFO_MARK_COLOR = (0.56, 0.62, 0.72, 1.0)        # info issues with a position
 SELECTED_COLOR = (1.0, 1.0, 1.0, 1.0)
 GRID_COLOR = (120, 130, 150, 60)
 

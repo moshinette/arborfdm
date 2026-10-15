@@ -55,6 +55,49 @@ Chaque chaîne non ramifiée devient un tube lissé ; sphères aux jonctions (ra
 
 Contrôles indépendants de la logique de routage (ils ne font pas confiance aux étiquettes de l'arbre) : contacts non routés ; régions de l'analyse sans contact routé à portée ; arbres dont la racine n'est ni sur le plateau ni sur le modèle ; pieds « sur le modèle » trop loin de sa surface ; composantes du maillage en l'air (les vides internes fermés sont ignorés) ; troncs élancés sans entretoise ; volume d'intersection supports/modèle comparé à la tolérance de pénétration des pointes ; validité du maillage des supports et du modèle ; contacts manuels trop proches ; **supports tranchés seuls** (`support_floating_region`) : le maillage des supports est découpé couche par couche comme par un slicer, et toute partie qui commencerait dans le vide ou dépasserait l'angle de surplomb est signalée. Le routage limite l'inclinaison des branches, pointes et entretoises à l'angle de surplomb moins 2°, et le bas des sphères de jonction est prolongé par une jupe conique noyée dans la branche.
 
+### Supports fragiles ou difficiles à retirer
+
+Deux contrôles ajoutés après le premier essai d'impression (arbre de 49 mm décroché, entretoise de 0,5 x 14 mm jugée fragile) et un retour d'utilisateur d'un outil comparable (supports faciles à retirer mais marques visibles). Ce sont des **règles empiriques, non calibrées par impression** : les seuils (constantes en tête de `verify.py`) ont été placés au-dessus des valeurs mesurées sur les modèles d'exemple avec les six profils, raft ou non, et ne se prononcent que sur la géométrie.
+
+**`fragile_support`** (avertissement, position, `contact_id` d'une pointe de l'arbre). Élancement d'une section = bras de levier / diamètre. Le bras de levier est la hauteur de tout ce que la section porte (sommet de son sous-arbre moins la hauteur de la section) : pendant l'impression la buse pousse latéralement le haut du support, la section travaille comme l'encastrement d'une console (contrainte en levier / d³, flèche en levier³ / d⁴). Le rayon et le levier sont linéaires le long d'un segment, le maximum est donc à un nœud : on évalue tous les nœuds branche/tronc, la section d'un tronc posé sur un pied est prise au-dessus de la collerette (`foot_height + collar_height`), les pointes ne sont pas évaluées. Une seule alerte par arbre (sa pire section), et les arbres voisins de moins de 10 mm ayant le même défaut sont regroupés (« N supports like this nearby »).
+
+| Cas | Seuil | Justification | Max mesuré sur les exemples |
+|---|---|---|---|
+| section >= 3 largeurs de ligne | levier / d > 25 | au moins 2 périmètres par côté | arbres sur plateau 20,0 ; arbres sur le modèle 23,1 |
+| section < 3 largeurs de ligne | levier / d > 10 | une seule boucle de périmètre, sans remplissage (0,66 mm en buse 0,2 ; 1,26 mm en buse 0,4) | 7,5 |
+| colonne posée sur le modèle | hauteur / diamètre du plot > 20 | ancrage ponctuel (`on_model_tip_diameter`) : 4,8 mm maxi sur un plot de 0,24, 8,4 mm sur 0,42 | voir ci-dessous |
+| entretoise | longueur / d > 20, ou d < 2 largeurs de ligne | 0,5 x 14 mm (28) jugée fragile ; aucune boucle fermée sous 2 largeurs | 16,4 |
+
+Le pied sur le plateau (adhérence du disque) reste du ressort de `unstable_trunk` / `tall_tree_on_raft` : `fragile_support` ne le compte pas une deuxième fois. L'arbre de 49 mm du premier essai avait un tronc de 2,0 mm (élancement de section 23,6) : il est signalé par `unstable_trunk` (pied), pas par ce contrôle.
+
+**`hard_to_remove`** (avertissement), deux cas :
+- *support posé sur le modèle difficile d'accès* : depuis deux points de la colonne (mi-hauteur et 90 %), 65 rayons (16 azimuts x élévations -30°, 0°, 30°, 60°, plus la verticale) sont lancés dans une grille en colonnes du modèle (`tree.ModelGrid`, 0,3 mm) jusqu'à 20 mm. **Enfermé** si moins de 10 % des directions sont libres sur 20 mm ; **coincé** si, sur un axe horizontal, les deux parois opposées sont à moins de 2,5 mm l'une de l'autre (place d'une pince fine). Regroupement par 10 mm. Mesures : figurine (supports posés sur les épaules) 34 % de directions libres au minimum, largeur minimale 3,1 mm, non signalés ;
+- *contacts trop denses* : pour chaque contact (pointes et plots sur le modèle), part d'un disque de 1,5 mm de rayon couverte par les marques (diamètre de marque = max(diamètre de pointe, largeur de ligne)) ; signalé au-delà de 30 % avec au moins 4 contacts. Maximum sur les exemples : 24 % (profil `nozzle_04_dense`, plan incliné).
+
+Résultats sur les exemples avec les profils par défaut (`tests/test_support_checks.py`, liste `EXPECTED`) : aucun arbre sur le plateau, aucune entretoise ni zone de contacts denses signalés. Les seules alertes concernent des supports posés sur le modèle et sont de vrais défauts :
+- `crossing_case` (buse 0,2) : colonnes de 12,1 mm sur des plots de 0,24 mm (50) ;
+- `figurine` (buse 0,2, Normal et Dense) : une colonne de 22,1 mm posée sur le socle sur un plot de 0,24 mm (92) ;
+- `impossible_case` : colonnes de 9,1 mm au fond du bol (38 en 0,2 ; 21,7 en 0,4), et enfermées (0 à 12 % de directions libres : seul un anneau de 3 mm au-dessus donne accès) ;
+- `cavity` (tous profils sauf `nozzle_04_light`) : supports au fond de la fente de la « bouche » (3 mm de haut, 6 mm de profondeur), 5 % de directions libres.
+
+Limites : élancement statique, sans matériau, température ni vitesse ; pas de calcul des efforts réels de la buse. L'accès est évalué en lignes droites (un outil courbe ou une ouverture plus étroite que la grille de 0,3 mm ne sont pas modélisés), seulement pour les supports posés sur le modèle (ceux qui partent du plateau s'arrachent par le bas). Les marques sont estimées par le diamètre des contacts, pas par la qualité de surface réelle (matière, `z_gap`, interface). Une colonne sur le modèle trop haute est signalée, pas corrigée : élargir le plot réduirait le risque mais agrandirait la marque, à décider par profil.
+
+### Statistiques (`GenerationResult.stats`)
+
+Calculées par `verify.support_stats` à chaque génération (comptées dans le temps `verify`), pour l'utilisateur et la comparaison de configurations (`arbor/core/compare.py`) :
+
+| Clé | Sens |
+|---|---|
+| `support_volume_mm3` | volume du maillage des supports (raft exclu) |
+| `support_mass_g` | volume x 1,24 g/cm³ (PLA plein : majorant, le trancheur remplit partiellement les gros troncs) |
+| `raft_volume_mm3`, `raft_mass_g` | idem pour le raft (0 sans raft) |
+| `contact_area_mm2` | somme des aires π r² des pointes et des plots posés sur le modèle (indicateur des marques) |
+| `model_contacts` | nombre de points de contact avec le modèle = `tip_contacts` + `model_feet` |
+| `max_tree_height_mm` | hauteur maximale d'un arbre au-dessus de sa racine (pied ou plot) |
+| `max_slenderness` | élancement de section maximal (plots compris) |
+| `max_fragility` | max(élancement / seuil applicable) ; > 1 : `fragile_support` émis |
+| `issues_by_code` | nombre de problèmes par code (toutes sévérités) |
+
 ## 6. Pointe paramétrique
 
 | Paramètre | Rôle |

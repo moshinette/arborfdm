@@ -11,8 +11,8 @@ First public release. Profiles are still **not validated by systematic print tes
 - Overhang colouring by angle in the 3D view.
 - Support self-check: floating regions and unsupported areas reported after generation, with suggested fixes.
 - 3MF "separate objects" layout (model and supports as two objects, each with its own layer height) for OrcaSlicer and Bambu Studio, in the CLI (`--layout separate`, `--model-layer-height`, `--support-layer-height`) and the GUI.
-- "Open in OrcaSlicer" from the GUI and the CLI (`--open-in-orca`, `arborfdm-cli orca`), with an application preferences dialog for the OrcaSlicer path. *(in progress at the time of writing, check before release)*
-- Reworked desktop UI (layout, icons, feedback during long computations). *(in progress at the time of writing, check before release)*
+- "Open in OrcaSlicer" from the GUI and the CLI (`--open-in-orca`, `arborfdm-cli orca`), with an application preferences dialog for the OrcaSlicer path. *(GUI launch covered by automated tests with a fake program; still to be tried with a real OrcaSlicer on Windows before release)*
+- Reworked desktop UI (layout, icons, feedback during long computations, contact info card, Del / Esc and grouped contact deletion, issues grouped by code).
 - Publication files: `LICENSE` (MIT), `THIRD_PARTY_NOTICES.md` and a generated `THIRD_PARTY_NOTICES.txt` in the Windows zip, `docs/LICENSES.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue and pull request templates.
 - GitHub Actions: tests on Linux and Windows (`tests.yml`), Windows build and draft release with SHA-256 checksums on `v*` tags (`release.yml`).
 

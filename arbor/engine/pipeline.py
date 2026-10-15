@@ -7,6 +7,7 @@ Stages (each in its own module, testable alone):
   build.mesh_tree       -> trimesh.Trimesh       (manifold union of all support solids)
   build.mesh_raft       -> trimesh.Trimesh|None
   verify.verify         -> list[Issue]           (post generation checks)
+  verify.support_stats  -> dict                  (GenerationResult.stats: volume, mass, marks...)
 """
 from __future__ import annotations
 
@@ -85,6 +86,7 @@ def generate(mesh: trimesh.Trimesh, params: SupportParams,
     t = time.perf_counter()
     issues: list[Issue] = _verify.verify(mesh, analysis, contacts, tree, support_mesh,
                                          params, progress.sub(0.92, 1.0))
+    stats = _verify.support_stats(mesh, contacts, tree, support_mesh, raft_mesh, issues, params)
     timings["verify"] = time.perf_counter() - t
     progress.update(1.0, "Done")
-    return GenerationResult(contacts, tree, support_mesh, raft_mesh, issues, analysis, timings)
+    return GenerationResult(contacts, tree, support_mesh, raft_mesh, issues, analysis, timings, stats)

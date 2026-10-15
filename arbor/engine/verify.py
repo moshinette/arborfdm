@@ -24,6 +24,15 @@ Checks (code -> meaning):
   rests_on_model       informational: supports standing on the model (marks on the part)
   collision_check_skipped  model is not a valid manifold, overlap could not be measured
   geometric_only       informational reminder that checks are geometric, not a print test
+  fragile_support      a support part may bend or snap while printing (warning): a section
+                       carrying too much height for its diameter, a column standing on the
+                       model on a pad too small for its height, a brace too thin / too long
+  hard_to_remove       supports hard to remove or likely to leave visible marks (warning):
+                       a support standing on the model in an enclosed / narrow place, or
+                       contacts so dense that their marks cover a large part of a small area
+
+Numbers useful to compare configurations are computed by support_stats() (stored in
+GenerationResult.stats by the pipeline).
 """
 from __future__ import annotations
 
@@ -40,6 +49,27 @@ PLATE_EPS = 0.3          # a foot is on the plate if within this of z_base
 SLENDER_RATIO = 18.0     # column height / foot radius above which a trunk is flagged
 COLLISION_ERROR_FACTOR = 3.0   # overlap above this multiple of the tip budget is an error
 MODEL_FOOT_TOL = 0.3     # max distance (mm) between a model foot and the model surface
+
+# --- fragile_support (rules of thumb, not calibrated by print tests; docs/ALGORITHM.md) ---
+# Section slenderness = lever / diameter: lever = height of everything the section carries
+# (top of its subtree minus the section height), the arm of the sideways force the nozzle
+# applies while printing the top of the support (bending stress grows with lever / d^3,
+# deflection with lever^3 / d^4).
+THIN_LINE_WIDTHS = 3.0    # below 3 line widths a branch is a single perimeter loop, no infill
+SLENDER_MAX = 25.0        # sections >= THIN_LINE_WIDTHS line widths (examples max: 23.1)
+SLENDER_MAX_THIN = 10.0   # thinner sections (examples max: 7.5)
+PAD_SLENDER_MAX = 20.0    # column standing on the model: height / pad diameter
+BRACE_SLENDER_MAX = 20.0  # brace length / diameter (examples max 16.4; judged fragile: 28)
+BRACE_MIN_LINE_WIDTHS = 2.0   # a brace thinner than 2 line widths has no closed loop
+GROUP_LINK = 10.0         # mm: findings of neighbouring trees closer than this are grouped
+# --- hard_to_remove ---
+ACCESS_RANGE = 20.0       # mm: a direction is open if no model surface within this range
+ACCESS_MIN_OPEN = 0.10    # open fraction below which a support is enclosed (figurine min: 0.34)
+WEDGE_GAP = 2.5           # mm: model-to-model horizontal width around a support (examples min: 3.1)
+MARK_RADIUS = 1.5         # mm: radius of the disc in which mark coverage is measured
+MARK_COVERAGE_MAX = 0.30  # fraction of that disc covered by contact marks (examples max: 0.24)
+MARK_MIN_CONTACTS = 4     # a dense spot needs at least this many contacts
+PLA_DENSITY = 1.24        # g/cm3, for the mass estimate in support_stats
 
 
 def _routed_contact_ids(tree: SupportTree) -> set[int]:
@@ -574,6 +604,388 @@ def _check_spacing(contacts, params, issues):
         reported += 1
 
 
+# ---------------------------------------------------------------------------
+# fragile supports (fragile_support)
+# ---------------------------------------------------------------------------
+def _subtree_info(tree: SupportTree):
+    """Walk the tree from its roots. Returns (children, order (parents first), root of
+    each node, ztop: highest z in the subtree of each node, cid: a contact id of the
+    subtree or None). Nodes not reachable from a root (malformed tree) are left out."""
+    ch: dict[int, list[int]] = {i: [] for i in tree.nodes}
+    stack = []
+    for n in tree.nodes.values():
+        if n.parent is not None and n.parent in tree.nodes and n.parent != n.id:
+            ch[n.parent].append(n.id)
+        else:                          # root (a dangling parent counts as a root here)
+            stack.append(n.id)
+    order: list[int] = []
+    root: dict[int, int] = {i: i for i in stack}
+    seen: set[int] = set()
+    while stack:
+        i = stack.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        order.append(i)
+        for c in ch[i]:
+            root[c] = root[i]
+            stack.append(c)
+    ztop: dict[int, float] = {}
+    cid: dict[int, Optional[int]] = {}
+    for i in reversed(order):
+        n = tree.nodes[i]
+        z = float(n.position[2])
+        c = n.contact_id if n.kind == NodeKind.TIP else None
+        for k in ch[i]:
+            if k in ztop:
+                z = max(z, ztop[k])
+                if c is None:
+                    c = cid[k]
+        ztop[i], cid[i] = z, c
+    return ch, order, root, ztop, cid
+
+
+def section_slenderness(tree: SupportTree, params: SupportParams) -> list[dict]:
+    """Slenderness of every support section that can bend while printing.
+
+    For every branch / trunk node (the section of the tube there) and every pad standing
+    on the model: lever = height of the top of everything above it (its subtree) minus
+    the height of the section, diameter = 2 x node radius (pad: the on-model pad), and
+    slenderness = lever / diameter. The nozzle pushes sideways on the top of the
+    support while it prints it, the section works as the root of a cantilever of that
+    length. The radius is linear along a segment and so is the lever: the largest ratio
+    of a segment is at one of its ends, which is why nodes are enough.
+
+    Plate feet are not sections (their disc is an adhesion problem: unstable_trunk). For
+    the trunk segment standing on a foot, the section is taken on top of the collar
+    (foot_height + collar_height above the foot), which reinforces what is below.
+    Tip cones are not sections (short, they rest on the model above once printed).
+
+    Each record: node, root, kind ("section" | "pad"), lever, diameter, slenderness,
+    limit (the threshold that applies), position (3,), contact_id."""
+    if not tree.nodes:
+        return []
+    P = params
+    ch, order, root, ztop, cid = _subtree_info(tree)
+    thin_d = THIN_LINE_WIDTHS * P.line_width
+    collar_top = P.foot_height + P.collar_height
+    out = []
+    for i in order:
+        n = tree.nodes[i]
+        if n.kind in (NodeKind.TIP, NodeKind.FOOT):
+            continue
+        d = 2.0 * float(n.radius)
+        z = float(n.position[2])
+        if n.kind == NodeKind.MODEL_FOOT:
+            kind, limit = "pad", PAD_SLENDER_MAX
+        else:
+            kind = "section"
+            limit = SLENDER_MAX_THIN if d < thin_d - 1e-9 else SLENDER_MAX
+            par = tree.nodes.get(n.parent) if n.parent is not None else None
+            if par is not None and par.kind == NodeKind.FOOT:
+                # the collar reinforces the trunk up to collar_top: first free section there
+                z = min(max(z, float(par.position[2]) + collar_top), ztop[i])
+        lever = ztop[i] - z
+        if lever <= 1e-9 or d <= 1e-9:
+            continue
+        out.append({"node": i, "root": root[i], "kind": kind, "lever": float(lever),
+                    "diameter": d, "slenderness": float(lever / d), "limit": float(limit),
+                    "position": np.array([n.position[0], n.position[1], z], float),
+                    "contact_id": cid[i]})
+    return out
+
+
+def _check_fragile(tree: SupportTree, params: SupportParams, issues, sections=None):
+    """fragile_support: the worst section of every tree (if beyond its limit) and every
+    brace too thin or too long for its diameter."""
+    P = params
+    lw = P.line_width
+    thin_d = THIN_LINE_WIDTHS * lw
+    recs = sections if sections is not None else section_slenderness(tree, P)
+    worst: dict[int, dict] = {}
+    for r in recs:
+        if r["slenderness"] <= r["limit"]:
+            continue
+        w = worst.get(r["root"])
+        if w is None or r["slenderness"] / r["limit"] > w["slenderness"] / w["limit"]:
+            worst[r["root"]] = r
+    found = []
+    # one issue per group of neighbouring trees with the same problem (a row of supports
+    # standing on the same ledge is one finding, not twenty)
+    for kind in ("pad", "section"):
+        rs = [r for r in worst.values() if r["kind"] == kind]
+        if not rs:
+            continue
+        for g in _clusters(np.array([r["position"] for r in rs]), GROUP_LINK):
+            r = max((rs[k] for k in g), key=lambda q: q["slenderness"] / q["limit"])
+            more = f" ({len(g)} supports like this nearby)" if len(g) > 1 else ""
+            if kind == "pad":
+                msg = (f"Support standing on the model is {r['lever']:.1f} mm tall on a "
+                       f"{r['diameter']:.2f} mm pad (height / pad {r['slenderness']:.0f} > "
+                       f"{r['limit']:.0f}){more}: it may snap off the model while printing; "
+                       "prefer a route to the plate, or check it in the slicer preview")
+            else:
+                thin = r["diameter"] < thin_d - 1e-9
+                what = (f"thinner than {THIN_LINE_WIDTHS:.0f} line widths ({thin_d:.2f} mm)"
+                        if thin else f"of {THIN_LINE_WIDTHS:.0f} line widths or more")
+                msg = (f"Support section {r['diameter']:.2f} mm thick carries {r['lever']:.1f} mm "
+                       f"of support above it (slenderness {r['slenderness']:.1f} > "
+                       f"{r['limit']:.0f} for sections {what}){more}: it may bend or snap while "
+                       "printing (consider thicker branches or braces)")
+            found.append((r["slenderness"] / r["limit"],
+                          Issue("warning", "fragile_support", msg, r["position"].copy(),
+                                r["contact_id"])))
+
+    for p0, p1, rb in getattr(tree, "braces", []) or []:
+        p0 = np.asarray(p0, float)
+        p1 = np.asarray(p1, float)
+        L = float(np.linalg.norm(p1 - p0))
+        d = 2.0 * float(rb)
+        if d <= 0 or L <= 0:
+            continue
+        too_thin = d < BRACE_MIN_LINE_WIDTHS * lw - 1e-9
+        too_long = L / d > BRACE_SLENDER_MAX
+        if not (too_thin or too_long):
+            continue
+        why = []
+        if too_thin:
+            why.append(f"thinner than {BRACE_MIN_LINE_WIDTHS:.0f} line widths "
+                       f"({BRACE_MIN_LINE_WIDTHS * lw:.2f} mm)")
+        if too_long:
+            why.append(f"length / diameter {L / d:.0f} > {BRACE_SLENDER_MAX:.0f}")
+        score = max(L / d / BRACE_SLENDER_MAX, BRACE_MIN_LINE_WIDTHS * lw / d)
+        found.append((score, Issue("warning", "fragile_support",
+                                   f"Brace {d:.2f} mm thick and {L:.1f} mm long ({'; '.join(why)}): "
+                                   "it may break while printing or when handled (consider a "
+                                   "thicker brace_diameter or a shorter brace_max_length)",
+                                   0.5 * (p0 + p1))))
+    found.sort(key=lambda t: -t[0])
+    issues.extend(i for _, i in found[:30])
+
+
+# ---------------------------------------------------------------------------
+# supports hard to remove (hard_to_remove)
+# ---------------------------------------------------------------------------
+def _access_directions() -> np.ndarray:
+    """Unit directions: 16 azimuths at elevations -30, 0, 30, 60 deg, plus straight up.
+    Rows 16..31 are the horizontal ones (k and k + 8 are opposite)."""
+    import math
+    out = []
+    for el in (-30.0, 0.0, 30.0, 60.0):
+        e = math.radians(el)
+        for k in range(16):
+            a = k * math.pi / 8 + 1e-3        # off the axes: no ray runs along a face edge
+            out.append([math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e)])
+    out.append([0.0, 0.0, 1.0])
+    return np.array(out)
+
+
+ACCESS_GRID_RES = 0.3      # mm: column grid used to march the access rays
+
+
+def _grid_inside(grid, P: np.ndarray) -> np.ndarray:
+    """Vectorised ModelGrid.inside for an (N, 3) array of points."""
+    i, j, ok = grid.cell_index(P[:, :2])
+    cell = j * grid.nx + i
+    a = np.searchsorted(grid.iv_cell, cell, side="left")
+    b = np.searchsorted(grid.iv_cell, cell, side="right")
+    out = np.zeros(len(P), bool)
+    kmax = int((b - a).max()) if len(P) else 0
+    for k in range(kmax):
+        idx = a + k
+        v = ok & (idx < b)
+        if not v.any():
+            break
+        ii = idx[v]
+        z = P[v, 2]
+        out[v] |= (grid.iv_lo[ii] <= z) & (grid.iv_hi[ii] >= z)
+    return out
+
+
+def _ray_distances(grid, origins: np.ndarray, dirs: np.ndarray, max_dist: float) -> np.ndarray:
+    """Distance along each (origin, dir) ray to the first model voxel column interval,
+    marched every half grid cell; inf if none within max_dist. (len(origins), len(dirs))."""
+    step = 0.5 * grid.res
+    s = np.arange(step, max_dist + 1e-9, step)
+    pts = origins[:, None, None, :] + dirs[None, :, None, :] * s[None, None, :, None]
+    ins = _grid_inside(grid, pts.reshape(-1, 3)).reshape(len(origins), len(dirs), len(s))
+    return np.where(ins.any(axis=2), s[np.argmax(ins, axis=2)], np.inf)
+
+
+def _access_samples(tree, ch, sub_ids, pad) -> np.ndarray:
+    """Points of a support standing on the model where a tool must reach: the support
+    nodes nearest to half and nine tenths of the column height (never the pad itself:
+    rays grazing the surface it stands on would all hit it)."""
+    pts = np.array([tree.nodes[i].position for i in sub_ids
+                    if tree.nodes[i].kind != NodeKind.TIP]).reshape(-1, 3)
+    z0 = float(pad.position[2])
+    ztop = max(float(tree.nodes[i].position[2]) for i in sub_ids)
+    out = []
+    for f in (0.5, 0.9):
+        zq = z0 + f * (ztop - z0)
+        if len(pts) > 1:
+            k = int(np.argmin(np.abs(pts[:, 2] - zq) + 1e3 * (pts[:, 2] <= z0 + 1e-6)))
+            p = pts[k].copy()
+            if p[2] <= z0 + 1e-6:
+                p = np.array([pad.position[0], pad.position[1], zq])
+        else:
+            p = np.array([pad.position[0], pad.position[1], zq])
+        out.append(p)
+    return np.unique(np.round(np.array(out), 6), axis=0)
+
+
+def _clusters(points: np.ndarray, link: float) -> list[list[int]]:
+    parent = list(range(len(points)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    if len(points) > 1:
+        for a, b in cKDTree(points).query_pairs(link):
+            parent[find(a)] = find(b)
+    groups: dict[int, list[int]] = {}
+    for k in range(len(points)):
+        groups.setdefault(find(k), []).append(k)
+    return list(groups.values())
+
+
+def _check_removal(mesh, tree: SupportTree, params: SupportParams, issues):
+    """hard_to_remove, (1) supports standing on the model in enclosed or narrow places,
+    (2) contacts so dense that their marks cover a large part of a small area."""
+    P = params
+    if not tree.nodes:
+        return
+    ch, order, root, ztop, cid = _subtree_info(tree)
+    pads = [tree.nodes[i] for i in order if tree.nodes[i].kind == NodeKind.MODEL_FOOT
+            and tree.nodes[i].parent is None]
+
+    # (1) access to supports standing on the model --------------------------------------
+    if pads and len(getattr(mesh, "faces", [])):
+        members: dict[int, list[int]] = {}
+        for i in order:
+            members.setdefault(root[i], []).append(i)
+        from .tree import ModelGrid
+        try:
+            grid = ModelGrid(mesh, ACCESS_GRID_RES, margin=1.0)
+        except Exception:
+            grid = None
+        dirs = _access_directions()
+        flagged = []      # (pad, open fraction, width, cid)
+        for pad in (pads if grid is not None else []):
+            S = _access_samples(tree, ch, members.get(pad.id, [pad.id]), pad)
+            dist = _ray_distances(grid, S, dirs, ACCESS_RANGE)
+            open_frac = float(np.isinf(dist).mean())
+            hz = dist[:, 16:32]
+            width = float(np.min(hz[:, :8] + hz[:, 8:]))
+            if open_frac < ACCESS_MIN_OPEN or width < WEDGE_GAP:
+                flagged.append((pad, open_frac, width, cid.get(pad.id)))
+        if flagged:
+            pts = np.array([f[0].position for f in flagged])
+            for g in _clusters(pts, GROUP_LINK):
+                fs = [flagged[k] for k in g]
+                open_min = min(f[1] for f in fs)
+                w_min = min(f[2] for f in fs)
+                why = []
+                if open_min < ACCESS_MIN_OPEN:
+                    why.append(f"enclosed: {100 * open_min:.0f}% of directions free of the model "
+                               f"within {ACCESS_RANGE:.0f} mm")
+                if w_min < WEDGE_GAP:
+                    why.append(f"wedged in a {w_min:.1f} mm gap between parts of the model")
+                first = fs[0]
+                issues.append(Issue(
+                    "warning", "hard_to_remove",
+                    f"{len(fs)} support(s) standing on the model near z={first[0].position[2]:.1f} mm "
+                    f"are hard to reach ({'; '.join(why)}): removing them may break the part or "
+                    "leave pieces inside; consider reorienting the model",
+                    first[0].position.copy(), first[3]))
+
+    # (2) dense contact marks ------------------------------------------------------------
+    marks = [n for n in tree.nodes.values() if n.kind in (NodeKind.TIP, NodeKind.MODEL_FOOT)]
+    if len(marks) < MARK_MIN_CONTACTS:
+        return
+    X = np.array([n.position for n in marks], float)
+    dm = np.maximum(2.0 * np.array([n.radius for n in marks], float), P.line_width)
+    A = np.pi * (dm / 2) ** 2
+    disc = np.pi * MARK_RADIUS ** 2
+    nb = cKDTree(X).query_ball_point(X, MARK_RADIUS)
+    cov = np.array([A[l].sum() for l in nb]) / disc
+    cnt = np.array([len(l) for l in nb])
+    bad = np.nonzero((cov > MARK_COVERAGE_MAX) & (cnt >= MARK_MIN_CONTACTS))[0]
+    if not len(bad):
+        return
+    shown = 0
+    for g in sorted(_clusters(X[bad], MARK_RADIUS), key=lambda g: -max(cov[bad[k]] for k in g)):
+        if shown >= 20:
+            break
+        shown += 1
+        k = bad[max(g, key=lambda k: cov[bad[k]])]
+        n = marks[k]
+        c = n.contact_id if n.kind == NodeKind.TIP else cid.get(n.id)
+        issues.append(Issue(
+            "warning", "hard_to_remove",
+            f"{cnt[k]} contacts within {MARK_RADIUS:.1f} mm: their marks cover "
+            f"{100 * cov[k]:.0f}% of that area (more than {100 * MARK_COVERAGE_MAX:.0f}%), the "
+            "surface will look scarred; remove some contacts or use thinner tips",
+            X[k].copy(), c))
+
+
+# ---------------------------------------------------------------------------
+# statistics
+# ---------------------------------------------------------------------------
+def support_stats(mesh, contacts, tree: SupportTree, support_mesh, raft_mesh,
+                  issues: list[Issue], params: SupportParams, sections=None) -> dict:
+    """Numbers to judge and compare generations (GenerationResult.stats).
+
+    support_volume_mm3  volume of the merged support mesh (raft excluded)
+    support_mass_g      support_volume_mm3 x PLA density (1.24 g/cm3), solid: an upper
+                        bound, the slicer prints walls + sparse infill in thick trunks
+    raft_volume_mm3, raft_mass_g   same for the raft (0 without raft)
+    contact_area_mm2    sum of the areas where supports touch the model (tip discs and
+                        pads on the model, pi r^2 of their node radius): proxy of the marks
+    model_contacts      number of places where supports touch the model (tips + pads)
+    tip_contacts, model_feet       the two parts of model_contacts
+    max_tree_height_mm  highest top of a tree above its root (plate foot or pad)
+    max_slenderness     largest section slenderness (lever / diameter, see
+                        section_slenderness; pads included)
+    max_fragility       largest slenderness / limit (> 1: fragile_support reported)
+    issues_by_code      {code: count} of the issues (all severities)"""
+    def vol(m):
+        try:
+            return float(m.volume) if m is not None and len(getattr(m, "faces", [])) else 0.0
+        except Exception:
+            return 0.0
+    sv, rv = vol(support_mesh), vol(raft_mesh)
+    nodes = list(tree.nodes.values()) if tree is not None else []
+    tips = [n for n in nodes if n.kind == NodeKind.TIP]
+    pads = [n for n in nodes if n.kind == NodeKind.MODEL_FOOT]
+    area = float(sum(np.pi * float(n.radius) ** 2 for n in tips + pads))
+    height = 0.0
+    if nodes:
+        _, order, root, ztop, _ = _subtree_info(tree)
+        for r in {root[i] for i in order}:
+            height = max(height, ztop[r] - float(tree.nodes[r].position[2]))
+    recs = sections if sections is not None else (section_slenderness(tree, params) if nodes else [])
+    by_code: dict[str, int] = {}
+    for i in issues:
+        by_code[i.code] = by_code.get(i.code, 0) + 1
+    return {
+        "support_volume_mm3": sv,
+        "support_mass_g": sv * PLA_DENSITY / 1000.0,
+        "raft_volume_mm3": rv,
+        "raft_mass_g": rv * PLA_DENSITY / 1000.0,
+        "contact_area_mm2": area,
+        "model_contacts": len(tips) + len(pads),
+        "tip_contacts": len(tips),
+        "model_feet": len(pads),
+        "max_tree_height_mm": float(height),
+        "max_slenderness": float(max((r["slenderness"] for r in recs), default=0.0)),
+        "max_fragility": float(max((r["slenderness"] / r["limit"] for r in recs), default=0.0)),
+        "issues_by_code": by_code,
+    }
+
+
 def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Contact],
            tree: SupportTree, support_mesh, params: SupportParams,
            progress: Optional[Progress] = None) -> list[Issue]:
@@ -588,6 +1000,8 @@ def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Conta
     _check_tree(tree, params, issues)
     _check_model_feet(mesh, tree, params, issues)
     _check_spacing(contacts, params, issues)
+    _check_fragile(tree, params, issues)
+    _check_removal(mesh, tree, params, issues)
     progress.update(0.55, "Checking meshes")
     support_man = None
     if support_mesh is not None and len(getattr(support_mesh, "faces", [])):

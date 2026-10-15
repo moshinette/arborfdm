@@ -77,6 +77,52 @@ PARAM_META: dict[str, tuple] = {
     "on_model_tip_diameter": ("Model supports", "Foot tip diameter", 0.05, 3, 0.01, 3, "mm", ""),
     "circle_segments": ("Meshing", "Circle segments", 6, 64, 1, 0, "", "Smoothness of cylinders"),
 }
+# short titles of the issue codes; any other code gets a readable title from its name
+ISSUE_LABELS = {
+    "unsupported_region": "Unsupported region",
+    "unrouted_contact": "Contact not connected",
+    "disconnected_branch": "Disconnected branch",
+    "floating_support": "Floating support",
+    "model_collision": "Support through the model",
+    "below_plate": "Below the plate",
+    "invalid_support_mesh": "Invalid support mesh",
+    "invalid_model_mesh": "Model mesh has errors",
+    "contacts_too_close": "Contacts too close",
+    "sub_layer_gap": "Gap under one layer",
+    "unstable_trunk": "Unstable trunk",
+    "tall_tree_on_raft": "Tall tree on raft",
+    "rests_on_model": "Support rests on the model",
+    "collision_check_skipped": "Collision check skipped",
+    "geometric_only": "Geometric check only",
+    "support_floating_region": "Support starts in the air",
+    "fragile_support": "Fragile support",
+    "hard_to_remove": "Hard to remove",
+}
+ISSUE_GROUP_MIN = 4          # a code with at least this many issues is shown as one group
+SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
+
+
+def issue_title(code) -> str:
+    """Readable title of an issue code, known or not ("some_new_code" -> "Some new code")."""
+    code = str(code or "").strip()
+    if code in ISSUE_LABELS:
+        return ISSUE_LABELS[code]
+    words = code.replace("_", " ").replace("-", " ").split()
+    return " ".join(words).capitalize() if words else "Issue"
+
+
+def issue_severity(issue) -> str:
+    """Severity of an issue as one of error / warning / info (unknown values count as
+    warnings: they are shown, never hidden)."""
+    sev = str(getattr(issue, "severity", "") or "").lower()
+    return sev if sev in SEVERITY_ORDER else "warning"
+
+
+def issue_text(issue) -> str:
+    msg = str(getattr(issue, "message", "") or "").strip()
+    return msg or issue_title(getattr(issue, "code", ""))
+
+
 GROUP_ORDER = ["Printer", "Detection", "Contacts", "Tips", "Branches / trunks", "Feet", "Braces",
                "Raft", "Model supports", "Meshing"]
 
@@ -575,7 +621,8 @@ class ContactEditor(QtWidgets.QGroupBox):
         lay.setContentsMargins(theme.SP_M, theme.SP_M, theme.SP_M, theme.SP_M)
         self.empty = QtWidgets.QLabel("Click a contact in the 3D view to edit it. Left click on "
                                       "the model adds a manual contact, right click on a contact "
-                                      "deletes it.", objectName="dim")
+                                      "deletes it. Del deletes the selected contact, Esc "
+                                      "deselects it.", objectName="dim")
         self.empty.setWordWrap(True)
         lay.addWidget(self.empty)
         self.body = QtWidgets.QWidget()
@@ -599,8 +646,8 @@ class ContactEditor(QtWidgets.QGroupBox):
         self.tip_spin.valueChanged.connect(self._on_tip)
         self.delete_button = QtWidgets.QPushButton("Delete contact")
         self.delete_button.setIcon(icons.clear())
-        self.delete_button.setToolTip("Delete this contact (undoable; right click in the view "
-                                      "does the same)")
+        self.delete_button.setToolTip("Delete this contact (Del; undoable; right click in the "
+                                      "view does the same)")
         self.delete_button.setObjectName("danger")
         self.delete_button.clicked.connect(self._on_delete)
         f.addRow(QtWidgets.QLabel("Contact", objectName="dim"), self.id_label)
@@ -612,7 +659,19 @@ class ContactEditor(QtWidgets.QGroupBox):
         f.addRow(QtWidgets.QLabel("Tip diameter", objectName="dim"), self.tip_spin)
         f.addRow(self.delete_button)
         lay.addWidget(self.body)
+        self.bulk_button = QtWidgets.QToolButton()
+        self.bulk_button.setText("Delete several contacts")
+        self.bulk_button.setToolTip("Delete all manual contacts, or all contacts of the selected "
+                                    "contact's reason (undoable)")
+        self.bulk_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.bulk_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.bulk_button.hide()
+        lay.addWidget(self.bulk_button)
         self.refresh()
+
+    def set_bulk_menu(self, menu: QtWidgets.QMenu) -> None:
+        self.bulk_button.setMenu(menu)
+        self.bulk_button.show()
 
     def contact(self):
         cid = self.project.selected_contact_id
@@ -786,28 +845,77 @@ class RightPanel(QtWidgets.QWidget):
     def _reset_all(self) -> None:
         self.project.set_params(self.project.profile_params(), text="Reset parameters")
 
+    GROUP_ROLE = QtCore.Qt.UserRole + 1        # header item: the code of its group
+
     def set_issues(self, issues: list, has_result: bool) -> None:
+        """Issues sorted by severity. A code that occurs ISSUE_GROUP_MIN times or more is
+        shown as one header line with a counter (click: show / hide its issues). Unknown
+        codes and severities are shown generically (readable title, warning style)."""
         self._issues = list(issues)
         self.issue_list.clear()
-        sev_order = {"error": 0, "warning": 1, "info": 2}
+        self._group_items: dict[str, tuple] = {}
         colours = {"error": theme.ERROR, "warning": theme.WARNING, "info": theme.TEXT_DIM}
+        sevs = [issue_severity(i) for i in self._issues]
+        codes = [str(getattr(i, "code", "") or "") for i in self._issues]
+        by_code: dict[str, list[int]] = {}
+        for k, c in enumerate(codes):
+            by_code.setdefault(c, []).append(k)
         # indexes come from enumerate: Issue holds numpy arrays, list.index / == on it is
         # ambiguous and two identical messages are legitimate (QA-7)
-        order = sorted(range(len(self._issues)),
-                       key=lambda k: (sev_order.get(self._issues[k].severity, 3), k))
-        for idx in order:
-            i = self._issues[idx]
-            item = QtWidgets.QListWidgetItem(icons.severity(i.severity), i.message)
-            if i.severity != "info":
-                item.setForeground(QtGui.QBrush(QtGui.QColor(colours.get(i.severity, theme.TEXT))))
+        order = sorted(range(len(self._issues)), key=lambda k: (SEVERITY_ORDER[sevs[k]], k))
+        expanded = getattr(self, "_expanded_codes", set())
+        done: set[str] = set()
+
+        def add_issue(idx: int, indent: bool) -> QtWidgets.QListWidgetItem:
+            i, sev, code = self._issues[idx], sevs[idx], codes[idx]
+            item = QtWidgets.QListWidgetItem(icons.severity(sev),
+                                             ("    " if indent else "") + issue_text(i))
+            if sev != "info":
+                item.setForeground(QtGui.QBrush(QtGui.QColor(colours[sev])))
             item.setData(QtCore.Qt.UserRole, idx)
-            where = ("No position attached" if i.position is None and i.contact_id is None
-                     else "Click to show it in the 3D view")
-            item.setToolTip(f"{i.severity.capitalize()} [{i.code}]\n{where}")
+            has_pos = getattr(i, "position", None) is not None or \
+                getattr(i, "contact_id", None) is not None
+            where = "Click to show it in the 3D view" if has_pos else "No position attached"
+            item.setToolTip(f"{sev.capitalize()}: {issue_title(code)} [{code or '-'}]\n{where}")
             self.issue_list.addItem(item)
-        ne = sum(1 for i in issues if i.severity == "error")
-        nw = sum(1 for i in issues if i.severity == "warning")
-        ni = len(issues) - ne - nw
+            return item
+
+        for idx in order:
+            code = codes[idx]
+            members = by_code[code]
+            if len(members) < ISSUE_GROUP_MIN:
+                add_issue(idx, False)
+                continue
+            if code in done:
+                continue
+            done.add(code)
+            members = sorted(members, key=lambda k: (SEVERITY_ORDER[sevs[k]], k))
+            worst = sevs[members[0]]
+            n_err = sum(1 for k in members if sevs[k] == "error")
+            n_warn = sum(1 for k in members if sevs[k] == "warning")
+            open_ = code in expanded
+            header = QtWidgets.QListWidgetItem(icons.severity(worst), "")
+            header.setData(self.GROUP_ROLE, code)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            if worst != "info":
+                header.setForeground(QtGui.QBrush(QtGui.QColor(colours[worst])))
+            mix = []
+            if n_err and n_err != len(members):
+                mix.append(f"{n_err} error(s)")
+            if n_warn and n_warn != len(members):
+                mix.append(f"{n_warn} warning(s)")
+            header.setToolTip(f"{len(members)} issues [{code or '-'}]"
+                              + (f" ({', '.join(mix)})" if mix else "")
+                              + "\nClick to show or hide them")
+            self.issue_list.addItem(header)
+            children = [add_issue(k, True) for k in members]
+            self._group_items[code] = (header, children, len(members))
+            self._set_group_open(code, open_)
+        ne = sevs.count("error")
+        nw = sevs.count("warning")
+        ni = len(sevs) - ne - nw
         if not has_result:
             self.issue_summary.setText("No generation yet")
         elif not issues:
@@ -822,7 +930,26 @@ class RightPanel(QtWidgets.QWidget):
                  part(ni, "info", theme.TEXT))))
         self.tabs.setTabText(1, "Contacts and issues" + (f" ({ne + nw})" if ne + nw else ""))
 
+    def _set_group_open(self, code: str, open_: bool) -> None:
+        header, children, n = self._group_items[code]
+        arrow = "\u25be" if open_ else "\u25b8"
+        header.setText(f"{arrow}  {issue_title(code)}  \u00d7 {n}")
+        for it in children:
+            it.setHidden(not open_)
+        exp = getattr(self, "_expanded_codes", set())
+        (exp.add if open_ else exp.discard)(code)
+        self._expanded_codes = exp
+
+    def toggle_issue_group(self, code: str) -> None:
+        if code in getattr(self, "_group_items", {}):
+            hidden = self._group_items[code][1][0].isHidden()
+            self._set_group_open(code, hidden)
+
     def _on_issue(self, item: QtWidgets.QListWidgetItem) -> None:
+        code = item.data(self.GROUP_ROLE)
+        if code is not None:
+            self.toggle_issue_group(code)
+            return
         idx = item.data(QtCore.Qt.UserRole)
         if idx is not None and 0 <= idx < len(self._issues):
             self.issueActivated.emit(self._issues[idx])
