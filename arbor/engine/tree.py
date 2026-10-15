@@ -373,6 +373,7 @@ class _Router:
         prog.update(0.9, "Braces")
         self._cleanup()
         self._limit_widening()
+        self._stabilize_feet()
         if P.braces_enabled:
             self._braces()
         if P.raft_enabled:
@@ -1138,6 +1139,44 @@ class _Router:
                 if okb:
                     tree.braces.append((p0, p1, rb))
                     flip = not flip
+
+    # -- stability ---------------------------------------------------------------
+    # Height of a tree / radius of its foot above which the foot is enlarged (verify flags
+    # unstable_trunk at 18). First print test (A1 mini, 0.2 nozzle): a 49 mm tree on a
+    # 3.5 mm foot detached half way through the print.
+    FOOT_SLENDERNESS = 14.0
+
+    def _stabilize_feet(self) -> None:
+        """Enlarge the foot of tall trees in proportion to their height, as far as the
+        clearance to the model allows (the raft, when enabled, then joins them)."""
+        tree, P = self.tree, self.P
+        if not tree.nodes:
+            return
+        root_of: dict[int, int] = {}
+        top: dict[int, float] = {}
+        for nid in tree.nodes:
+            path, i = [], nid
+            while i not in root_of and tree.nodes[i].parent is not None and len(path) < 100000:
+                path.append(i)
+                i = tree.nodes[i].parent
+            r = root_of.get(i, i)
+            for q in path + [i]:
+                root_of[q] = r
+            top[r] = max(top.get(r, -1e9), float(tree.nodes[nid].position[2]))
+        k_top = int(math.ceil((P.foot_height + P.collar_height) / self.dz))
+        for r, ztop in top.items():
+            n = tree.nodes[r]
+            if n.kind != NodeKind.FOOT:
+                continue
+            h = ztop - self.zb
+            cur = float(tree.foot_radius.get(r, P.foot_diameter / 2))
+            want = h / self.FOOT_SLENDERNESS
+            if want <= cur:
+                continue
+            md = min(self.mdist(k, n.position[:2])[0] for k in range(0, k_top + 1))
+            new = min(want, md - 0.2)
+            if new > cur:
+                tree.foot_radius[r] = float(new)
 
     def _raft_keepout(self) -> None:
         from shapely.geometry import box

@@ -80,3 +80,26 @@ Buse : ____ Profil : ____ Date : ____
 ## 6. Exploitation
 
 Reporter le diamètre et la densité retenus dans le profil concerné (`profiles/nozzle_XX_*.json`), avec en description la référence de l'essai (date, imprimante, matière). Ne jamais présenter une valeur comme « calibrée » sans tableau rempli ci-dessus.
+
+## Résultats
+
+### Essai 1 : 2026-10-15, figurine d'exemple
+
+| Élément | Valeur |
+|---|---|
+| Imprimante, buse | Bambu Lab A1 mini, 0,2 mm acier inox |
+| Trancheur | OrcaSlicer 2.4.2, préréglage « 0.08mm Optimal » |
+| Profil ArborFDM | `nozzle_02_normal`, raft activé |
+| Résultat | échec vers 50 % : un support s'est décroché, puis fils dans le vide autour de la zone qu'il tenait |
+
+Observations de l'utilisateur : un support décroché vers la moitié de l'impression ; raft trop épais (0,8 mm) ; souhait d'un raft d'environ 0,15 mm.
+
+Analyse de la génération correspondante : l'arbre le plus haut posé sur le plateau mesurait 49 mm sur un pied de 3,5 mm (élancement 28, avertissement `unstable_trunk` émis), branches de 0,7 mm, aucune entretoise ; le raft était coupé en 3 morceaux par l'empreinte du socle (deux pads de 73 et 42 mm²).
+
+Corrections (commit suivant cet essai) :
+- profils 0,2 : `branch_min_diameter` 0,7 -> 0,9 mm, `trunk_diameter` 2,0 -> 2,4 mm, `foot_diameter` 5 -> 6 mm, `raft_thickness` 0,8 -> 0,16 mm (2 couches de 0,08) ; profils 0,4 : `raft_thickness` 0,8 -> 0,24 mm ;
+- les pieds des arbres hauts sont agrandis en proportion de leur hauteur (hauteur / 14), dans la limite de la place laissée par le modèle ;
+- le raft est rejoint en une seule plaque par un anneau autour de l'empreinte du modèle ;
+- fragments de support de volume quasi nul supprimés après l'union.
+
+Limite : sur cette figurine, les deux arbres les plus hauts sont collés au socle et leur pied ne peut dépasser environ 4 mm ; sans raft ils restent signalés `unstable_trunk`. Avec le raft (désormais d'une seule pièce) ils sont ancrés à la plaque. À réimprimer pour confirmer.

@@ -369,6 +369,9 @@ def _tree_groups(tree: SupportTree) -> list[list[int]]:
     return list(groups.values())
 
 
+MIN_PART_VOLUME = 1e-3   # mm3: separate support fragments below this are dropped
+
+
 def mesh_tree_manifold(tree: SupportTree, params: SupportParams,
                        progress: Optional[Progress] = None) -> mf.Manifold:
     solids = tree_solids(tree, params, progress)
@@ -380,7 +383,15 @@ def mesh_tree_manifold(tree: SupportTree, params: SupportParams,
     # Tilted tube ends and spheres near the feet can dip below the support base; nothing may
     # exist under it (plate, or raft top which the raft mesh fills).
     z_base = getattr(tree, "z_base", params.raft_thickness if params.raft_enabled else 0.0)
-    return union.trim_by_plane((0.0, 0.0, 1.0), float(z_base))
+    union = union.trim_by_plane((0.0, 0.0, 1.0), float(z_base))
+    # Two solids that almost touch can leave a separate fragment of (near) zero volume after
+    # the union; it cannot be printed and would show up as a floating sliver in a slicer.
+    parts = union.decompose()
+    if len(parts) > 1:
+        keep = [q for q in parts if q.volume() >= MIN_PART_VOLUME]
+        if 0 < len(keep) < len(parts):
+            union = mf.Manifold.compose(keep)
+    return union
 
 
 def mesh_tree(tree: SupportTree, params: SupportParams, progress: Optional[Progress] = None
@@ -434,6 +445,18 @@ def raft_polygon(tree: SupportTree, params: SupportParams):
         # never remove the area right under a foot
         must = unary_union([Point(xy[i]).buffer(rad[i], 16) for i in range(len(feet))])
         poly = poly.difference(keep.difference(must))
+        if getattr(poly, "geoms", None) is not None and len(poly.geoms) > 1:
+            # The model footprint cut the raft into islands (first print test: small pads
+            # came loose). Join them with a ring around the footprint, inside the hull of
+            # all feet so the raft does not grow around the whole model needlessly.
+            hull = MultiPoint([pt for d in [Point(xy[i]).buffer(rad[i] + P.raft_margin, 16)
+                                            for i in range(len(feet))]
+                               for pt in d.exterior.coords]).convex_hull
+            ring_w = max(P.raft_margin, 2.0)
+            ring = keep.buffer(ring_w).difference(keep)
+            joined = unary_union([poly, ring.intersection(hull.buffer(ring_w))])
+            if len(getattr(joined, "geoms", [joined])) < len(poly.geoms):
+                poly = joined
     if poly.is_empty or poly.area < 1e-6:
         return None
     return poly

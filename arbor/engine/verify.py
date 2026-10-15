@@ -172,6 +172,13 @@ def _check_tree(tree: SupportTree, params, issues):
                                            <= params.brace_max_length)
         if braced:
             continue
+        if params.raft_enabled:
+            # the foot is part of one raft plate (build.raft_polygon joins the pieces): the
+            # anchoring is the raft, not the foot disc alone
+            issues.append(Issue("info", "tall_tree_on_raft",
+                                f"Tree of height {h:.1f} mm stands on a {2 * fr:.1f} mm foot, "
+                                "anchored by the raft", rn.position.copy()))
+            continue
         hints = [x for x, on in (("braces", not params.braces_enabled),
                                  ("a raft", not params.raft_enabled), ("a larger foot", True)) if on]
         issues.append(Issue("warning", "unstable_trunk",
