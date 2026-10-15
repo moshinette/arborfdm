@@ -67,7 +67,8 @@ python --version
 
 echo [2/5] Installing dependencies (a few minutes the first time)> con
 python -m pip install --upgrade pip || goto :fail
-python -m pip install ".[gui,dev]" || goto :fail
+REM lxml: needed by the tests (trimesh 3MF reader); listed explicitly for older pyproject.toml
+python -m pip install ".[gui,dev]" "lxml>=4.9" || goto :fail
 
 echo [3/5] Tests> con
 set QT_QPA_PLATFORM=offscreen
