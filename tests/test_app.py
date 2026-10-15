@@ -468,3 +468,35 @@ def test_picking_structure_built_in_background(app):
     for _ in range(20):
         vp.pick_model(400, 300)
     assert (time.perf_counter() - t0) / 20 < 0.05
+
+
+def test_cut_is_reset_when_another_model_is_loaded(app, window, stl_path):
+    """A cut left active on the previous model must not slice the next one open."""
+    window.open_path(stl_path)
+    wait_for(app, window)
+    window.view.clip_slider.setValue(500)
+    assert window.viewport.clip_z is not None
+    assert "font-weight: bold" in window.view.clip_label.styleSheet()   # active cut is visible
+    window.open_path(os.path.join(EXAMPLES, "shelf.stl"))
+    wait_for(app, window)
+    assert window.view.clip_slider.value() == 1000
+    assert window.viewport.clip_z is None and window.view.clip_label.text() == "all"
+    window.view.clip_slider.setValue(300)
+    window.new_project()
+    assert window.viewport.clip_z is None
+
+
+def test_cut_is_reset_when_another_model_is_loaded(app, window, stl_path):
+    """A cut left active on the previous model must not slice the next one open."""
+    window.open_path(stl_path)
+    wait_for(app, window)
+    window.view.clip_slider.setValue(500)
+    assert window.viewport.clip_z is not None
+    assert "font-weight: bold" in window.view.clip_label.styleSheet()   # active cut is visible
+    window.open_path(os.path.join(EXAMPLES, "shelf.stl"))
+    wait_for(app, window)
+    assert window.view.clip_slider.value() == 1000
+    assert window.viewport.clip_z is None and window.view.clip_label.text() == "all"
+    window.view.clip_slider.setValue(300)
+    window.new_project()
+    assert window.viewport.clip_z is None

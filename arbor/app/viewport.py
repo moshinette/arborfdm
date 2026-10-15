@@ -680,11 +680,24 @@ class ViewportContainer(QtWidgets.QWidget):
         h = self.viewport.scene_height()
         if value >= 1000 or h <= 0:
             self.clip_label.setText("all")
+            self.clip_label.setStyleSheet("")
+            self.clip_label.setToolTip("")
             self.viewport.set_clip(None)
         else:
             z = h * value / 1000.0
             self.clip_label.setText(f"{z:.1f}")
+            # make an active cut obvious: the model looks sliced open otherwise
+            self.clip_label.setStyleSheet("color: #ffb347; font-weight: bold;")
+            self.clip_label.setToolTip(f"Cut active: everything above {z:.1f} mm is hidden "
+                                       "(display only). Drag the slider to the top to show all.")
             self.viewport.set_clip(z)
+
+    def reset_clip(self) -> None:
+        """Show the whole scene again (used when another model or project is loaded)."""
+        if self.clip_slider.value() != 1000:
+            self.clip_slider.setValue(1000)     # emits valueChanged -> _on_clip
+        else:
+            self._on_clip(1000)
 
     def refresh_clip(self) -> None:
         self._on_clip(self.clip_slider.value())

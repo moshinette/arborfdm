@@ -445,6 +445,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.runner.is_running() or not self._confirm_discard():
             return
         self.project.new()
+        self.view.reset_clip()
         self._refresh_everything(fit=True)
         self.message("New project")
 
@@ -687,6 +688,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.last_mesh_report = report
             self.left.show_candidates([])
             self._show_mesh_state(report)
+            self.view.reset_clip()
             self._refresh_everything(fit=True)
             msg = (f"Loaded {result.name}: {len(result.mesh.faces):,} triangles"
                    + (f", {len(result.warnings)} warning(s)" if result.warnings else ""))
@@ -701,6 +703,7 @@ class MainWindow(QtWidgets.QMainWindow):
             p.set_mesh_report(p.base_mesh, report)
             self.last_mesh_report = report
             self._show_mesh_state(report)
+            self.view.reset_clip()
             self._refresh_everything(fit=True)
             self.message(f"Opened project {Path(context[1]).name}"
                          + (" (the mesh has errors: Repair recommended)" if p.mesh_problems()
