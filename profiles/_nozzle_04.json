@@ -12,7 +12,7 @@
     "branch_min_diameter": 1.0,
     "branch_max_diameter": 2.4,
     "trunk_diameter": 2.6,
-    "brace_diameter": 0.8,
+    "brace_diameter": 1.2,
     "xy_clearance": 0.8,
     "on_model_tip_diameter": 0.42,
     "min_region_area": 0.15,
