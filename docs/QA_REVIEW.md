@@ -18,6 +18,26 @@ QT_QPA_PLATFORM=offscreen python3 -m pytest tests/test_qa_review.py -q -p no:cac
 Chaque xfail a aussi été lancé avec `--runxfail` pour vérifier qu'il échoue pour la raison
 annoncée et pas à cause d'une erreur du test (18 échecs, messages cités plus bas).
 
+## Suivi des corrections (2026-10-15)
+
+Tous les défauts ci-dessous ont été corrigés après la revue ; les tests xfail correspondants ont été rendus normaux sans changer leurs assertions et passent (suite complète : 398 passed, 0 xfail).
+
+| Id | Correctif | Par |
+|---|---|---|
+| QA-1 | `verify` ignore les coques inversées fermées (vides internes) | agent principal |
+| QA-2 | lancer de rayons et remplissage par blocs, grille bornée (0,2 mm : 463 Mo au lieu de > 4 Go) | geometry-researcher |
+| QA-3 | modèle verrouillé pendant les calculs, éditions rejouées ou résultat marqué périmé, paramètres de l'export = ceux de la géométrie | frontend-3d-engineer |
+| QA-4 | `model_collision` devient une erreur au-delà de 3x la tolérance des pointes | agent principal |
+| QA-5 | distance de chaque `MODEL_FOOT` au modèle vérifiée | agent principal |
+| QA-6 | diagnostic au chargement, choix avant génération ; `invalid_model_mesh` émis par le moteur | frontend-3d-engineer, agent principal |
+| QA-7 | `set_issues` indexe par position | frontend-3d-engineer |
+| QA-8 | refus clair au-delà de 1000 mm | agent principal |
+| QA-9 | dégagement de la base de pointe mesuré sur les tranches réellement traversées | support-engineer |
+| QA-10 | `validate()` : valeurs finies, bornes positives, raft | agent principal |
+| QA-11 | picking accéléré construit en arrière-plan (survol 0,3 à 0,5 ms) | frontend-3d-engineer |
+| QA-12 | avertissement d'échelle sous 5 mm | agent principal |
+| QA-13 | avertissement d'export persistant | frontend-3d-engineer |
+
 ## Synthèse
 
 | Id | Gravité | Défaut |

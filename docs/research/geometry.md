@@ -52,6 +52,8 @@ Conséquence voulue : un trou de plafond est rétréci de d sur chaque bord (cav
 
 ## 5. Placement des contacts
 
+> Section dépassée sur l'échantillonnage des arêtes et le remplissage résiduel : la version à jour est dans `docs/ALGORITHM.md` (section 2).
+
 Ordre de priorité, avec le premier arrivé qui couvre son voisinage : manuel > îlot (≥ 1 par île, posé sur le point bas de l'île s'il existe) > point bas > coin > arête (pas `edge_spacing/density`) > remplissage hexagonal des îles et surplombs (pas `contact_spacing/density`, échantillonnage du contour pour les bandes trop fines) > faces du masque restantes.
 - Couverture : un candidat est sauté s'il existe un contact à moins de `min_contact_distance`, ou à moins de 0,55 × pas pour les arêtes et surfaces. Les voisins de grille (distance = pas) survivent. Écart maximal mesuré entre un point de la surface et le contact le plus proche : 2,2 à 2,8 mm pour un pas de 3 mm.
 - Projection : rayon vertical +Z depuis sous la région, testé contre les seules faces descendantes, indexées dans un KD-tree XY avec liste brute pour les grands triangles. Normale = normale de la face touchée. Les coins et arêtes sont décalés vers l'intérieur de la face du rayon de pointe (`tip_diameter/2`), pour que la pointe ne déborde pas.

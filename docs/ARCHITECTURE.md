@@ -39,7 +39,7 @@ arbor/
   core/      mesh_io (import STL/OBJ/3MF), repair (diagnostic/réparation), transform, orientation, project (document + undo/redo)
   engine/    params, types, analysis (slicing), contacts, tree (routage), build (maillage manifold), verify, pipeline
   io/        export (3MF/STL) et relecture de validation
-  app/       interface PySide6 + viewport pyqtgraph.opengl (aucune géométrie ici)
+  app/       interface PySide6 + viewport pyqtgraph.opengl + picking accéléré (aucune géométrie moteur ici)
   cli.py     ligne de commande
 profiles/    profils JSON (héritage), buse 0,2 / 0,4 x Light/Normal/Dense
 tests/       pytest, modèles synthétiques

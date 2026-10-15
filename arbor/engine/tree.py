@@ -1,6 +1,6 @@
 """Tree routing: contact tips -> branches -> trunks -> feet.
 
-Overview (details and rationale in docs/research/supports.md):
+Overview (details in docs/ALGORITHM.md):
 
 1. ModelGrid voxelizes the model once into vertical occupancy intervals per XY grid
    column ("depth peeling" of every triangle over the grid centres). It answers
