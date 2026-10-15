@@ -6,6 +6,9 @@
 Output: dist/ArborFDM/
     ArborFDM(.exe)        GUI, windowed (no console)
     arborfdm-cli(.exe)    command line, console
+    LICENSE.txt           ArborFDM license
+    THIRD_PARTY_NOTICES.txt  licenses of everything bundled (packaging/collect_notices.py)
+    README.md
     _internal/            Python runtime, libraries, and profiles/ (= sys._MEIPASS)
 
 Profiles: arbor/engine/params.py computes
@@ -31,7 +34,7 @@ datas += collect_data_files("trimesh")            # trimesh/resources (templates
 try:
     datas += copy_metadata("arborfdm")             # importlib.metadata.version() when frozen
 except Exception:
-    pass                                            # not pip-installed: CLI falls back to 0.1.0
+    pass                                            # not pip-installed: see arbor/cli.py _version()
 binaries = collect_dynamic_libs("manifold3d")
 
 # Engine modules imported lazily (inside functions) are found by static analysis because
@@ -95,3 +98,18 @@ if BUILD_GUI:
     collect_args = [exe_gui, a_gui.binaries, a_gui.datas] + collect_args
 
 coll = COLLECT(*collect_args, strip=False, upx=False, name="ArborFDM")
+
+# ---------------------------------------------------------------------------
+# License files next to the executables (required to redistribute the LGPL Qt/PySide6
+# and GEOS libraries, the GCC runtime notices, the PSF license...).
+import shutil
+from pathlib import Path
+
+sys.path.insert(0, PKG)
+import collect_notices  # noqa: E402
+
+OUT = os.path.join(DISTPATH, "ArborFDM")
+NOTICES = collect_notices.build(Path(OUT) / "THIRD_PARTY_NOTICES.txt", gui=BUILD_GUI)
+shutil.copyfile(os.path.join(ROOT, "LICENSE"), os.path.join(OUT, "LICENSE.txt"))
+shutil.copyfile(os.path.join(ROOT, "README.md"), os.path.join(OUT, "README.md"))
+print(f"notices written to {NOTICES}")

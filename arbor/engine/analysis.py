@@ -4,7 +4,8 @@ Two complementary detectors (see docs/research/geometry.md):
 
 1. Virtual slicing (authoritative for "what will the printer see").
    The mesh is cut at every layer centre z_i = layer_height * (i + 0.5).
-   For layer i, with d = layer_height * tan(overhang_angle) (or
+   For layer i, with d = max_layer_step(params) (layer_height x
+   tan(overhang_angle), capped at one line width, or
    params.max_unsupported_overhang when > 0):
        unsupported_i = layer_i - offset(layer_{i-1}, d)
    Connected components of layer_i that do not touch layer_{i-1} at all are
@@ -14,7 +15,10 @@ Two complementary detectors (see docs/research/geometry.md):
 2. Face based (cheap, resolution independent, used to place contacts on
    slopes that only show up as thin strips in the slices).
    overhang_face_mask: faces whose downward tilt from vertical exceeds the
-   overhang angle (-n_z > sin(angle)), excluding faces lying on the plate.
+   effective overhang angle atan(d / layer_height) (-n_z > sin(angle)),
+   excluding faces lying on the plate. Using the angle of d (not the raw
+   parameter) keeps both detectors on the same threshold when d is capped
+   or given explicitly (docs/research/overhang_angles.md).
    From this mask we derive hanging edges, corners of flat overhangs and
    local low points.
 
@@ -45,6 +49,36 @@ from .types import AnalysisResult, Progress, SupportRegion
 _EMPTY_CS = m3d.CrossSection()
 HANGING_CREASE_DEG = 25.0  # min dihedral angle for a hanging edge
 LOW_POINT_RADIUS = 1.0     # mm, a low point is the lowest vertex within this radius
+# Upper bound of the step derived from the angle, in line widths. A layer that
+# extends one full line width beyond the layer below leaves its outer bead with
+# no overlap at all (0 % overlap = floating extrusion in PrusaSlicer's overhang
+# classes, 100 % overhang in OrcaSlicer's): the angle cannot allow more.
+MAX_STEP_LINE_WIDTHS = 1.0
+
+
+def max_layer_step(params: SupportParams) -> tuple[float, str]:
+    """Largest horizontal step (mm) a layer may make beyond the layer below
+    without support, and where it comes from: "explicit"
+    (max_unsupported_overhang > 0, used as given), "angle" (layer_height x
+    tan(overhang_angle_deg)) or "line_width" (the angle step capped at
+    MAX_STEP_LINE_WIDTHS x line_width)."""
+    if params.max_unsupported_overhang > 0:
+        return float(params.max_unsupported_overhang), "explicit"
+    d = params.layer_height * math.tan(math.radians(params.overhang_angle_deg))
+    cap = MAX_STEP_LINE_WIDTHS * params.line_width
+    if d > cap:
+        return float(cap), "line_width"
+    return float(d), "angle"
+
+
+def effective_overhang_angle_deg(params: SupportParams) -> float:
+    """Overhang angle (deg from vertical) matching max_layer_step: a face tilted
+    more than this makes each layer step farther than d. Equal to
+    overhang_angle_deg unless the step is capped or explicit."""
+    d, source = max_layer_step(params)
+    if source == "angle":
+        return float(params.overhang_angle_deg)
+    return math.degrees(math.atan2(d, params.layer_height))
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +235,7 @@ def _face_analysis(mesh: trimesh.Trimesh, params: SupportParams, stats: dict):
     h = params.layer_height
     normals = np.asarray(mesh.face_normals, dtype=np.float64)
     fz = v[:, 2][f]
-    sin_t = math.sin(math.radians(params.overhang_angle_deg))
+    sin_t = math.sin(math.radians(effective_overhang_angle_deg(params)))
     on_plate = fz.max(axis=1) < h
     mask = (-normals[:, 2] > sin_t) & ~on_plate
     areas = np.asarray(mesh.area_faces)
@@ -401,9 +435,11 @@ def analyze(mesh: trimesh.Trimesh, params: SupportParams, progress: Progress) ->
 
     # ---- layer comparison ---------------------------------------------------
     t = time.perf_counter()
-    d = params.max_unsupported_overhang if params.max_unsupported_overhang > 0 else \
-        h * math.tan(math.radians(params.overhang_angle_deg))
+    d, step_source = max_layer_step(params)
     stats["max_step"] = d
+    stats["max_step_source"] = step_source
+    stats["max_step_line_widths"] = d / params.line_width
+    stats["effective_overhang_angle_deg"] = effective_overhang_angle_deg(params)
     min_area = params.min_region_area
     regions: list[SupportRegion] = []
     layer_polys: list = []

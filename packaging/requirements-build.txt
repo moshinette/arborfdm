@@ -1,0 +1,19 @@
+# Versions used for the release build (constraints file, not a full lock).
+# Tested together on 2026-10-15: full test suite on Linux (Python 3.13) and Windows wheels
+# checked to exist for Python 3.12 / win_amd64. Use with:
+#   pip install -c packaging/requirements-build.txt ".[gui,dev]"
+# Update deliberately (bump, run the tests, rebuild), not automatically.
+numpy==2.5.3
+scipy==1.18.1
+trimesh==5.1.1
+manifold3d==3.5.4
+shapely==2.2.0
+networkx==3.6.1
+PySide6==6.12.0
+pyqtgraph==0.14.0
+PyOpenGL==3.1.10
+pytest==9.1.1
+lxml==6.1.3
+rtree==1.4.1
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8

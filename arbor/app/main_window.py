@@ -10,8 +10,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from arbor.core.presets import PresetError, PresetStore, is_user_key, slugify
 from arbor.core.project import PROJECT_SUFFIX, GenerationRequest, Project
 
-from . import theme
+from . import icons, theme
 from .panels import LeftPanel, RightPanel
+from .preferences import PreferencesDialog
 from .viewport import ViewportContainer
 from .worker import TaskRunner, run_generation
 
@@ -146,25 +147,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_actions(self) -> None:
         K = QtGui.QKeySequence.StandardKey
-        self.act_new = self._action("New", self.new_project, "SP_FileIcon", K.New,
-                                    "New empty project")
-        self.act_open = self._action("Open", self.open_dialog, "SP_DialogOpenButton", K.Open,
-                                     "Open a model (STL, OBJ, 3MF) or an ArborFDM project")
-        self.act_save = self._action("Save", self.save_project, "SP_DialogSaveButton", K.Save,
-                                     "Save the project (.arbor)")
+        self.act_new = self._action("New", self.new_project, icons.new(), K.New,
+                                    "New empty project (Ctrl+N)")
+        self.act_open = self._action("Open", self.open_dialog, icons.open_(), K.Open,
+                                     "Open a model (STL, OBJ, 3MF) or an ArborFDM project "
+                                     "(Ctrl+O)")
+        self.act_save = self._action("Save", self.save_project, icons.save(), K.Save,
+                                     "Save the project (.arbor) (Ctrl+S)")
         self.act_save_as = self._action("Save as...", self.save_project_as, None, K.SaveAs)
-        self.act_undo = self._action("Undo", self.undo, "SP_ArrowBack", K.Undo)
-        self.act_redo = self._action("Redo", self.redo, "SP_ArrowForward", K.Redo)
+        self.act_undo = self._action("Undo", self.undo, icons.undo(), K.Undo)
+        self.act_redo = self._action("Redo", self.redo, icons.redo(), K.Redo)
         self.act_generate = self._action("Generate supports", self.generate_full,
-                                         theme.tree_icon(), "Ctrl+G",
+                                         icons.generate(), "Ctrl+G",
                                          "Detect, place contacts and build the trees "
-                                         "(manual contacts are kept)")
+                                         "(manual contacts are kept) (Ctrl+G)")
         self.act_rebuild = self._action("Rebuild branches", self.generate_branches,
-                                        theme.rebuild_icon(), "Ctrl+B",
+                                        icons.rebuild(), "Ctrl+B",
                                         "Rebuild the trees from the current contacts "
-                                        "(after manual edits)")
+                                        "(after manual edits) (Ctrl+B)")
         self.act_clear = self._action("Clear supports", self.project.clear_supports,
-                                      "SP_DialogResetButton", None,
+                                      icons.clear(), None,
                                       "Remove all contacts and supports (undoable)")
         self.act_export_3mf = self._action("3MF: model + supports + raft", self.export_3mf, None,
                                            "Ctrl+E", "One 3MF with separate objects")
@@ -174,9 +176,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "height in OrcaSlicer / Bambu Studio")
         self.act_export_stl_sup = self._action("STL: supports only", self.export_stl_supports)
         self.act_export_stl_all = self._action("STL: model + supports", self.export_stl_all)
-        self.act_cancel = self._action("Cancel", self.cancel_task, "SP_BrowserStop", "Esc",
-                                       "Cancel the running computation")
-        self.act_fit = self._action("Fit view", lambda: self.viewport.fit_view(), None, "F")
+        self.act_open_orca = self._action(
+            "Open in OrcaSlicer", self.open_in_orca, icons.slicer(), None,
+            "Export model and supports and open them in OrcaSlicer")
+        self.act_cancel = self._action("Cancel", self.cancel_task, icons.cancel(), "Esc",
+                                       "Cancel the running computation (Esc)")
+        self.act_fit = self._action("Fit view", lambda: self.viewport.fit_view(), icons.fit(), "F")
+        self.act_preferences = self._action("Preferences...", self.open_preferences,
+                                            icons.preferences(), "Ctrl+,",
+                                            "Application settings (slicers)")
+        self.act_preferences.setMenuRole(QtGui.QAction.PreferencesRole)
         self.act_quit = self._action("Quit", self.close, None, K.Quit)
         self.act_preset_save = self._action("Save preset...", self.save_preset, None, None,
                                             "Save the current parameters as a named preset")
@@ -202,7 +211,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_toolbar(self) -> None:
         tb = QtWidgets.QToolBar("Main")
         tb.setMovable(False)
-        tb.setIconSize(QtCore.QSize(20, 20))
+        tb.setIconSize(QtCore.QSize(theme.TOOLBAR_ICON, theme.TOOLBAR_ICON))
         tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
         for a in (self.act_new, self.act_open, self.act_save):
@@ -223,14 +232,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.export_menu.addAction(self.act_export_3mf_sep)
         self.export_menu.addAction(self.act_export_stl_sup)
         self.export_menu.addAction(self.act_export_stl_all)
+        self.export_menu.addSeparator()
+        self.export_menu.addAction(self.act_open_orca)
         self.export_button = QtWidgets.QToolButton()
         self.export_button.setText("Export")
-        self.export_button.setIcon(theme.export_icon())
+        self.export_button.setIcon(icons.export())
         self.export_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self.export_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.export_button.setMenu(self.export_menu)
         self.export_button.setToolTip("Export the model and its supports")
         tb.addWidget(self.export_button)
+        tb.addAction(self.act_open_orca)
+        self.orca_button = tb.widgetForAction(self.act_open_orca)
         self.toolbar = tb
 
     def _build_menu(self) -> None:
@@ -240,6 +253,8 @@ class MainWindow(QtWidgets.QMainWindow):
             m.addAction(a)
         m.addSeparator()
         m.addMenu(self.export_menu)
+        m.addSeparator()
+        m.addAction(self.act_preferences)
         m.addSeparator()
         m.addAction(self.act_quit)
         m = mb.addMenu("&Edit")
@@ -256,20 +271,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_statusbar(self) -> None:
         sb = self.statusBar()
+        sb.setSizeGripEnabled(False)
         self.status_msg = QtWidgets.QLabel("Ready")
+        # a long message is cut, never widens the window (full text in the tooltip)
+        self.status_msg.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                      QtWidgets.QSizePolicy.Preferred)
+        self.status_msg.setMinimumWidth(80)
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 1000)
-        self.progress_bar.setFixedWidth(220)
+        self.progress_bar.setFixedWidth(160)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.hide()
         self.cancel_button = QtWidgets.QPushButton("Cancel")
-        self.cancel_button.setIcon(theme.std_icon(self, "SP_BrowserStop"))
+        self.cancel_button.setIcon(icons.cancel())
+        self.cancel_button.setToolTip("Cancel the running computation (Esc)")
         self.cancel_button.clicked.connect(self.cancel_task)
         self.cancel_button.hide()
         self.contacts_label = QtWidgets.QLabel("Contacts: 0")
         self.tree_label = QtWidgets.QLabel("Trees: -")
         self.time_label = QtWidgets.QLabel("Time: -")
         self.issues_label = QtWidgets.QLabel("Errors: 0  Warnings: 0")
+        for w in (self.contacts_label, self.tree_label, self.time_label, self.issues_label):
+            w.setObjectName("stat")
+        self.time_label.setToolTip("Computation time of the last generation, per stage")
         sb.addWidget(self.status_msg, 1)
         sb.addPermanentWidget(self.progress_bar)
         sb.addPermanentWidget(self.cancel_button)
@@ -293,6 +317,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner.finished.connect(self._on_task_finished)
         self.runner.failed.connect(self._on_task_failed)
         self.runner.cancelled.connect(self._on_task_cancelled)
+        self.view.busy_card.cancelRequested.connect(self.cancel_task)
+        self._busy_progress = (0.0, "")
+        self._busy_timer = QtCore.QTimer(self, interval=500)
+        self._busy_timer.timeout.connect(self._refresh_busy_card)
 
     # ------------------------------------------------------------------ refresh
     def _refresh_everything(self, fit: bool = False) -> None:
@@ -306,6 +334,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_scene(self, fit: bool = False) -> None:
         self.viewport.set_model(self.project.mesh, fit=fit)
+        self.view.set_empty(not self.project.has_model)
         self.view.refresh_clip()
 
     def _refresh_contacts(self) -> None:
@@ -367,6 +396,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_export_stl_sup.setEnabled(res and not busy)
         self.act_export_stl_all.setEnabled(has and not busy)
         self.export_button.setEnabled(has and not busy)
+        self.act_open_orca.setEnabled(res and not busy)
         self.act_new.setEnabled(not busy)
         self.act_open.setEnabled(not busy)
         self.act_cancel.setEnabled(busy)
@@ -453,6 +483,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ helpers
     def message(self, text: str, error: bool = False, warning: bool = False) -> None:
         self.status_msg.setText(text)
+        self.status_msg.setToolTip(text)
         self.status_msg.setStyleSheet(f"color: {theme.ERROR};" if error else
                                       (f"color: {theme.WARNING};" if warning else ""))
 
@@ -689,6 +720,27 @@ class MainWindow(QtWidgets.QMainWindow):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(d)))
         self.message(f"Presets folder: {d}")
 
+    # ------------------------------------------------------------------ slicer, preferences
+    def open_in_orca(self) -> None:
+        """Placeholder: replaced by the OrcaSlicer launch (arbor/io/slicer_launch.py)."""
+        self.message("Open in OrcaSlicer: not available yet", warning=True)
+        self._info("Open in OrcaSlicer", "Opening the result in OrcaSlicer is not available yet.\n"
+                   "Use Export > 3MF for Orca / Bambu: separate objects, then open the file "
+                   "in OrcaSlicer.")
+
+    def preferences_dialog(self) -> PreferencesDialog:
+        """The preferences dialog (created once, kept: its fields keep their state)."""
+        dlg = getattr(self, "_preferences_dialog", None)
+        if dlg is None:
+            dlg = self._preferences_dialog = PreferencesDialog(self)
+        return dlg
+
+    def open_preferences(self) -> None:
+        dlg = self.preferences_dialog()
+        if QtCore.QCoreApplication.instance().property("arbor_no_dialogs"):
+            return
+        dlg.exec()
+
     # ------------------------------------------------------------------ edit slots
     def undo(self) -> None:
         if not self.runner.is_running():
@@ -859,12 +911,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cancel_button.setEnabled(running)
         if running:
             self.progress_bar.setValue(0)
+            self._busy_progress = (0.0, "")
+            self._busy_timer.start()
+        else:
+            self._busy_timer.stop()
+        self._refresh_busy_card()
         self._refresh_actions()
 
     def _on_progress(self, fraction: float, message: str) -> None:
         self.progress_bar.setValue(int(fraction * 1000))
+        self._busy_progress = (float(fraction), message or self._busy_progress[1])
         if message:
             self.status_msg.setText(f"{self.runner.label}: {message}")
+        self._refresh_busy_card()
+
+    def _refresh_busy_card(self) -> None:
+        """Progress card over the 3D view: task, step, percentage, elapsed time, Cancel."""
+        if not self.runner.is_running():
+            self.view.set_busy("", 0.0, "", 0.0)
+            return
+        started = getattr(self.runner, "started_at", 0.0) or time.perf_counter()
+        fraction, step = self._busy_progress
+        self.view.set_busy(self.runner.label or "Computing", fraction, step,
+                           max(0.0, time.perf_counter() - started))
 
     def _on_task_failed(self, message: str, tb: str, context) -> None:
         self.last_error = tb

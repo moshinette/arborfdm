@@ -1,9 +1,43 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.eggs/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# virtual environments (run_dev creates .venv, build_windows.bat creates .venv-build)
+.venv*/
+venv*/
+env/
+
+# build output (PyInstaller, setuptools, build_windows.bat log, generated notices)
 build/
 dist/
-*.egg-info/
+*.zip
+*.sha256
+
+# generated files and user data: never publish models you do not own
 out/
-.venv/
-.venv-build/
+*.log
+*.3mf
+*.arbor
+!examples/**/*.3mf
+!tests/**/*.3mf
+!examples/**/*.arbor
+user_models/
+private/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+# Claude Code: local settings only (agent definitions in .claude/agents/ are tracked)
+.claude/settings.local.json

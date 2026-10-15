@@ -18,9 +18,11 @@ Deux détecteurs complémentaires.
 non_soutenu_i = couche_i - offset(couche_{i-1}, d)
 ```
 
+Le pas d est plafonné à une largeur de ligne (`MAX_STEP_LINE_WIDTHS`) : au-delà, le cordon extérieur n'a plus aucun recouvrement avec la couche du dessous (le plafond ne joue qu'au-dessus de 70° pour 0,22/0,08 et 74° pour 0,42/0,12 ; les profils restent à 55°). Une valeur explicite de `max_unsupported_overhang` est prise telle quelle. Détails et sources : `docs/research/overhang_angles.md`.
+
 Les composantes qui ne touchent pas du tout la couche précédente sont des **îlots** ; les autres morceaux non soutenus sont des **surplombs**. Les morceaux plus petits que `min_region_area` sont ignorés (bruit, ponts courts). Les résultats sont consultables couche par couche (`AnalysisResult.layer_polygons`, coupe par hauteur dans la vue).
 
-**Analyse des faces.** Une face dont l'inclinaison vers le bas dépasse l'angle (-n_z > sin(angle)) est en surplomb. On en dérive les arêtes suspendues, les coins des surplombs plats et les points bas locaux (bout d'un bras, menton). Cette analyse attrape les pentes qui n'apparaissent que comme des bandes très fines dans les couches.
+**Analyse des faces.** Une face dont l'inclinaison vers le bas dépasse l'angle effectif atan(d / hauteur de couche) (-n_z > sin(angle)) est en surplomb. Cet angle est égal à `overhang_angle_deg` sauf si d est plafonné ou explicite : les deux détecteurs gardent ainsi le même seuil. On en dérive les arêtes suspendues, les coins des surplombs plats et les points bas locaux (bout d'un bras, menton). Cette analyse attrape les pentes qui n'apparaissent que comme des bandes très fines dans les couches.
 
 ## 2. Placement des contacts (`contacts.py`)
 

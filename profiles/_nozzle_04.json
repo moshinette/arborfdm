@@ -3,6 +3,7 @@
   "label": "0.4 mm base",
   "values": {
     "nozzle_diameter": 0.4,
+    "overhang_angle_deg": 55.0,
     "line_width": 0.42,
     "layer_height": 0.12,
     "tip_diameter": 0.45,

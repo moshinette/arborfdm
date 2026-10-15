@@ -4,7 +4,9 @@
                  [--stl-supports s.stl] [--repair] [--auto-orient] [--json report.json]
                  [--layout objects|components|separate]
                  [--model-layer-height MM] [--support-layer-height MM]
+                 [--open-in-orca [--orca-path PATH]]   (-o optional with --open-in-orca)
     arborfdm-cli check in.stl [--json report.json]
+    arborfdm-cli orca --find | --set-path PATH | --clear-path
     arborfdm-cli profiles [--json]
 
 Exit codes
@@ -228,6 +230,108 @@ def cmd_check(args, out: _Out) -> int:
     return EXIT_OK if rep.is_valid else EXIT_PROBLEMS
 
 
+def _configured_orca_path(out: Optional[_Out] = None) -> Optional[str]:
+    import warnings
+    from arbor.core.settings import load_settings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        s = load_settings()
+    if out is not None:
+        for w in caught:
+            out.warn(str(w.message))
+    return s.get("orca_path")
+
+
+def _resolve_orca(explicit: Optional[str], out: _Out):
+    """OrcaSlicer executable for --open-in-orca: --orca-path (must be valid), else the
+    path saved in the settings (if valid), else automatic detection. None if not found
+    (a warning is printed; the file is still exported)."""
+    from arbor.io.slicer_launch import check_orca_path, find_orcaslicer
+    if explicit:
+        why = check_orca_path(explicit)
+        if why is not None:
+            raise CliError(f"--orca-path: {why}")
+        return Path(explicit).expanduser()
+    configured = _configured_orca_path(out)
+    if configured:
+        why = check_orca_path(configured)
+        if why is not None:
+            out.warn(f"OrcaSlicer path in the settings ignored ({why}); trying automatic detection")
+    exe = find_orcaslicer(configured)
+    if exe is None:
+        out.warn("OrcaSlicer not found (see 'arborfdm-cli orca --find'); the file will be "
+                 "exported but not opened. Set the path with --orca-path or "
+                 "'arborfdm-cli orca --set-path PATH'.")
+    return exe
+
+
+def _open_in_orca(model, sup, raft, params, name, layer_heights, exe, out: _Out,
+                  notes: list, files: dict, report: dict) -> bool:
+    """Export the file for OrcaSlicer and open it. Returns True if it could not be opened."""
+    from arbor.io.slicer_launch import (SlicerExportError, SlicerLaunchError, SlicerNotFound,
+                                        export_for_slicer, launch_orcaslicer)
+    try:
+        path = export_for_slicer(model, sup, raft, params, name,
+                                 layer_heights=layer_heights, notes=notes)
+    except (SlicerExportError, ValueError) as exc:
+        out.error(f"open in OrcaSlicer: {exc}")
+        report["orca"] = {"file": None, "exe": str(exe) if exe else None, "opened": False,
+                          "error": str(exc)}
+        return True
+    files["orca"] = str(path)
+    out.info(f"Wrote {path} (for OrcaSlicer: 2 objects, OrcaSlicer supports disabled per object)")
+    info = {"file": str(path), "exe": str(exe) if exe else None, "opened": False}
+    report["orca"] = info
+    if exe is None:
+        info["error"] = "OrcaSlicer not found"
+        out.error(f"OrcaSlicer not found: open {path} yourself")
+        return True
+    try:
+        launch_orcaslicer(path, exe)
+    except (SlicerNotFound, SlicerLaunchError) as exc:
+        info["error"] = str(exc)
+        out.error(f"open in OrcaSlicer: {exc}")
+        return True
+    info["opened"] = True
+    out.info(f"Opening in OrcaSlicer ({exe})")
+    return False
+
+
+def cmd_orca(args, out: _Out) -> int:
+    from arbor.io.slicer_launch import candidate_paths, check_orca_path, find_orcaslicer
+    if args.set_path is not None or args.clear_path:
+        from arbor.core.settings import SettingsError, settings_path, update_settings
+        if args.set_path is not None:
+            why = check_orca_path(args.set_path)
+            if why is not None:
+                raise CliError(f"--set-path: {why}")
+            value: Optional[str] = str(Path(args.set_path).expanduser().resolve())
+        else:
+            value = None
+        try:
+            update_settings(orca_path=value)
+        except SettingsError as exc:
+            raise CliError(str(exc)) from None
+        out.info(f"OrcaSlicer path {'set to ' + value if value else 'cleared (automatic detection)'} "
+                 f"in {settings_path()}")
+        return EXIT_OK
+    configured = _configured_orca_path(out)
+    if configured:
+        why = check_orca_path(configured)
+        print(f"Configured path: {configured}" + (f" (INVALID: {why})" if why else " (ok)"))
+    exe = find_orcaslicer(configured)
+    if exe is not None:
+        print(f"OrcaSlicer: {exe}")
+        return EXIT_OK
+    print("OrcaSlicer not found. Locations tried:")
+    for p in candidate_paths():
+        print(f"  {p}")
+    from arbor.io.slicer_launch import PATH_NAMES
+    print(f"  (and PATH: {', '.join(PATH_NAMES)})")
+    print("Set the path with: arborfdm-cli orca --set-path PATH")
+    return EXIT_PROBLEMS
+
+
 def cmd_generate(args, out: _Out) -> int:
     import numpy as np
     from arbor.core.repair import check_mesh, repair_mesh
@@ -236,14 +340,21 @@ def cmd_generate(args, out: _Out) -> int:
     from arbor.engine.types import Progress
     from arbor.io.export import export_3mf, export_stl, validate_export
 
-    out_path = Path(args.output)
-    if out_path.suffix.lower() not in (".3mf", ".stl"):
+    if not args.output and not args.open_in_orca:
+        raise CliError("-o/--output is required (or use --open-in-orca)")
+    if args.orca_path and not args.open_in_orca:
+        raise CliError("--orca-path needs --open-in-orca")
+    out_path = Path(args.output) if args.output else None
+    if out_path is not None and out_path.suffix.lower() not in (".3mf", ".stl"):
         raise CliError("output must end with .3mf or .stl")
     layer_heights = {k: v for k, v in (("model", args.model_layer_height),
                                        ("supports", args.support_layer_height)) if v is not None}
-    if layer_heights and (args.layout != "separate" or out_path.suffix.lower() != ".3mf"):
+    sep_output = (out_path is not None and args.layout == "separate"
+                  and out_path.suffix.lower() == ".3mf")
+    if layer_heights and not (sep_output or args.open_in_orca):
         raise CliError("--model-layer-height / --support-layer-height need a .3mf output "
-                       "and --layout separate")
+                       "and --layout separate (or --open-in-orca)")
+    orca_exe = _resolve_orca(args.orca_path, out) if args.open_in_orca else None
     for k, v in layer_heights.items():
         if not 0.0 < v <= 2.0:
             raise CliError(f"--{'support' if k == 'supports' else 'model'}-layer-height must be in (0, 2] mm")
@@ -338,14 +449,18 @@ def cmd_generate(args, out: _Out) -> int:
     name = lm.name or Path(args.input).stem
     notes: list[str] = []
     files: dict[str, str] = {}
-    if out_path.suffix.lower() == ".3mf":
+    problems: list[str] = []
+    report["export"] = {}
+    if out_path is None:
+        pass
+    elif out_path.suffix.lower() == ".3mf":
         er = export_3mf(out_path, mesh, sup if has_sup else None, res.raft_mesh, params, model_name=name,
-                        layout=args.layout, layer_heights=layer_heights or None)
+                        layout=args.layout, layer_heights=(layer_heights or None) if sep_output else None)
         notes += er.notes
         problems = validate_export(out_path)
         report["export"] = {"path": out_path, "objects": er.objects, "layout": er.layout,
                             "offset_mm": er.offset, "triangles": er.n_triangles,
-                            "layer_heights": layer_heights}
+                            "layer_heights": layer_heights if sep_output else {}}
     else:
         parts = [m for m in (mesh, sup if has_sup else None, res.raft_mesh)
                  if m is not None and len(m.faces)]
@@ -353,8 +468,9 @@ def cmd_generate(args, out: _Out) -> int:
                    names=[name, f"{name} supports", f"{name} raft"][:len(parts)])
         problems = []
         report["export"] = {"path": out_path, "objects": ["model + supports (one STL)"]}
-    files["output"] = str(out_path)
-    out.info(f"Wrote {out_path}")
+    if out_path is not None:
+        files["output"] = str(out_path)
+        out.info(f"Wrote {out_path}")
     if args.stl_supports:
         sparts = [m for m in (sup if has_sup else None, res.raft_mesh) if m is not None and len(m.faces)]
         if sparts:
@@ -364,6 +480,10 @@ def cmd_generate(args, out: _Out) -> int:
             out.info(f"Wrote {args.stl_supports}")
         else:
             out.warn("no support generated: --stl-supports file not written")
+    launch_failed = False
+    if args.open_in_orca:
+        launch_failed = _open_in_orca(mesh, sup if has_sup else None, res.raft_mesh, params, name,
+                                      layer_heights or None, orca_exe, out, notes, files, report)
     for n in notes:
         out.info(f"export: {n}")
     for p in problems:
@@ -373,8 +493,11 @@ def cmd_generate(args, out: _Out) -> int:
     report["files"] = files
     if not has_sup:
         out.warn("no support was generated (nothing to support?)")
-    out.info("Reminder: disable the slicer's own supports when printing this file.")
-    if out_path.suffix.lower() == ".3mf" and args.layout == "separate":
+    if out_path is not None:
+        out.info("Reminder: disable the slicer's own supports when printing this file.")
+    if out_path is None:
+        pass
+    elif out_path.suffix.lower() == ".3mf" and args.layout == "separate":
         out.info("Separate objects, each resting on the plate: OrcaSlicer / Bambu Studio keep them "
                  "as separate objects; PrusaSlicer may ask 'Multi-part object detected', both "
                  "answers keep the alignment (see docs/SLICERS.md).")
@@ -383,7 +506,7 @@ def cmd_generate(args, out: _Out) -> int:
                  "detected' to keep the model on its supports, or export with --layout separate "
                  "(see docs/SLICERS.md).")
 
-    code = EXIT_PROBLEMS if (res.errors or problems) else EXIT_OK
+    code = EXIT_PROBLEMS if (res.errors or problems or launch_failed) else EXIT_OK
     report["errors"] = len(res.errors) + len(problems)
     report["warnings"] = len(res.warnings)
     report["exit_code"] = code
@@ -420,7 +543,8 @@ def make_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("generate", parents=[common], help="generate supports and export a 3MF (or STL)")
     g.add_argument("input", help="model file (STL, OBJ or 3MF), millimetres")
-    g.add_argument("-o", "--output", required=True, help="output .3mf (model + supports + raft) or .stl")
+    g.add_argument("-o", "--output", help="output .3mf (model + supports + raft) or .stl "
+                   "(optional with --open-in-orca)")
     g.add_argument("--profile", default="nozzle_04_normal", help="profile key (see 'profiles')")
     g.add_argument("--set", action="append", metavar="KEY=VALUE",
                    help="override a parameter, repeatable (e.g. --set tip_diameter=0.5)")
@@ -439,6 +563,12 @@ def make_parser() -> argparse.ArgumentParser:
     g.add_argument("--support-layer-height", type=float, metavar="MM",
                    help="with --layout separate: layer height of the supports (+ raft) object "
                         "for OrcaSlicer / Bambu Studio")
+    g.add_argument("--open-in-orca", action="store_true",
+                   help="also write a 3MF for OrcaSlicer in ArborFDM's to_slicer folder (separate "
+                        "objects, OrcaSlicer supports disabled per object) and open it in OrcaSlicer")
+    g.add_argument("--orca-path", metavar="PATH",
+                   help="OrcaSlicer program to use with --open-in-orca (default: saved path, "
+                        "then automatic detection)")
     g.add_argument("--json", metavar="FILE", help="write a JSON report")
     g.set_defaults(func=cmd_generate)
 
@@ -451,6 +581,15 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print profiles and values as JSON")
     p.add_argument("--params", action="store_true", help="also list every parameter name")
     p.set_defaults(func=cmd_profiles)
+
+    o = sub.add_parser("orca", parents=[common], help="find OrcaSlicer / set its path")
+    og = o.add_mutually_exclusive_group(required=True)
+    og.add_argument("--find", action="store_true",
+                    help="print the OrcaSlicer program found (exit 1 and the locations tried if none)")
+    og.add_argument("--set-path", metavar="PATH", help="save the OrcaSlicer program path in the settings")
+    og.add_argument("--clear-path", action="store_true",
+                    help="forget the saved path (back to automatic detection)")
+    o.set_defaults(func=cmd_orca)
     return ap
 
 

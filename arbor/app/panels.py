@@ -12,7 +12,7 @@ from arbor.core.presets import is_user_key
 from arbor.core.project import Project
 from arbor.engine.params import SupportParams
 
-from . import theme
+from . import icons, theme
 
 # name: (group, label, min, max, step, decimals, unit, tooltip)
 PARAM_META: dict[str, tuple] = {
@@ -21,9 +21,9 @@ PARAM_META: dict[str, tuple] = {
     "layer_height": ("Printer", "Layer height", 0.02, 0.8, 0.01, 3, "mm",
                      "Layer height used for the layer by layer analysis"),
     "walls": ("Printer", "Walls (advice)", 1, 10, 1, 0, "", "Perimeters advised in the slicer"),
-    "overhang_angle_deg": ("Detection", "Overhang angle", 10, 89, 1, 1, "deg",
+    "overhang_angle_deg": ("Detection", "Overhang angle", 10, 89, 1, 1, "\u00b0",
                            "From vertical: faces tilted more than this need support"),
-    "min_region_area": ("Detection", "Min region area", 0.0, 50, 0.05, 2, "mm2",
+    "min_region_area": ("Detection", "Min region area", 0.0, 50, 0.05, 2, "mm\u00b2",
                         "Smaller unsupported areas are ignored"),
     "max_unsupported_overhang": ("Detection", "Max overhang step", 0.0, 10, 0.05, 2, "mm",
                                  "Max horizontal step between layers (0 = from angle)"),
@@ -50,7 +50,7 @@ PARAM_META: dict[str, tuple] = {
                      "Min horizontal clearance of branches from the model"),
     "branch_min_diameter": ("Branches / trunks", "Branch min diameter", 0.2, 10, 0.05, 2, "mm", ""),
     "branch_max_diameter": ("Branches / trunks", "Branch max diameter", 0.2, 10, 0.05, 2, "mm", ""),
-    "branch_angle_deg": ("Branches / trunks", "Branch angle", 0, 60, 1, 1, "deg",
+    "branch_angle_deg": ("Branches / trunks", "Branch angle", 0, 60, 1, 1, "\u00b0",
                          "Max tilt of a branch from vertical"),
     "segment_length": ("Branches / trunks", "Segment length", 0.1, 10, 0.1, 2, "mm", ""),
     "merge_distance": ("Branches / trunks", "Merge distance", 0, 50, 0.5, 2, "mm",
@@ -116,9 +116,11 @@ class ParamField(QtCore.QObject):
             w.setSingleStep(step)
             w.setKeyboardTracking(False)
             if unit:
-                w.setSuffix(f" {unit}")
+                w.setSuffix(unit if unit == "\u00b0" else f" {unit}")
             w.valueChanged.connect(lambda v: self.edited.emit(self.name, float(v)))
         if isinstance(w, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox)):
+            # explicit minimum: the hint (widest value of the range) would widen the panels
+            w.setMinimumWidth(76)
             w.setFocusPolicy(QtCore.Qt.StrongFocus)
             w.installEventFilter(self)
         w.setToolTip(f"{tip}\n[{name}]" if tip else f"[{name}]")
@@ -149,16 +151,16 @@ class ParamField(QtCore.QObject):
 def _group(title: str) -> tuple[QtWidgets.QGroupBox, QtWidgets.QVBoxLayout]:
     g = QtWidgets.QGroupBox(title)
     lay = QtWidgets.QVBoxLayout(g)
-    lay.setContentsMargins(8, 10, 8, 8)
-    lay.setSpacing(6)
+    lay.setContentsMargins(theme.SP_M, theme.SP_M, theme.SP_M, theme.SP_M)
+    lay.setSpacing(theme.SP_M - 2)
     return g, lay
 
 
 def _form() -> QtWidgets.QFormLayout:
     f = QtWidgets.QFormLayout()
     f.setContentsMargins(0, 0, 0, 0)
-    f.setHorizontalSpacing(8)
-    f.setVerticalSpacing(5)
+    f.setHorizontalSpacing(theme.SP_M)
+    f.setVerticalSpacing(theme.SP_S + 2)
     f.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     f.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
     return f
@@ -170,9 +172,17 @@ def _scroll(inner: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
     sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
     sa.setWidget(inner)
     # never narrower than the content: nothing is clipped horizontally
-    sa.setMinimumWidth(inner.minimumSizeHint().width() + sa.verticalScrollBar().sizeHint().width()
-                       + 4)
+    sa.setMinimumWidth(max(theme.PANEL_MIN_W, inner.minimumSizeHint().width()
+                           + sa.verticalScrollBar().sizeHint().width() + 4))
     return sa
+
+
+def _panel_root(inner: QtWidgets.QWidget) -> QtWidgets.QVBoxLayout:
+    """Layout of a side panel's scrolled content: same margins and gaps everywhere."""
+    root = QtWidgets.QVBoxLayout(inner)
+    root.setContentsMargins(theme.SP_M, theme.SP_XS, theme.SP_M, theme.SP_M)
+    root.setSpacing(theme.SP_XS)
+    return root
 
 
 def ordered_profiles(project: Project) -> list[str]:
@@ -191,7 +201,7 @@ def ordered_user_presets(project: Project) -> list[str]:
                   key=lambda k: project.profiles[k].label.lower())
 
 
-USER_PRESET_COLOR = "#8fd0ff"
+USER_PRESET_COLOR = theme.USER_PRESET
 
 
 # ---------------------------------------------------------------------------
@@ -214,24 +224,31 @@ class LeftPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self.project = project
         self.candidates: list = []
+        self.setObjectName("panel")
+        self.setAttribute(QtCore.Qt.WA_StyledBackground)
         inner = QtWidgets.QWidget()
-        root = QtWidgets.QVBoxLayout(inner)
-        root.setContentsMargins(8, 4, 8, 8)
-        root.setSpacing(4)
+        root = _panel_root(inner)
 
         # --- model -------------------------------------------------------------
         g, lay = _group("Model")
         self.import_button = QtWidgets.QPushButton("Import model...")
-        self.import_button.setIcon(theme.std_icon(self, "SP_DialogOpenButton"))
+        self.import_button.setIcon(icons.import_())
+        self.import_button.setToolTip("Import a model (STL, OBJ, 3MF)")
         self.import_button.clicked.connect(self.importRequested)
         lay.addWidget(self.import_button)
-        self.object_list = QtWidgets.QListWidget()
-        self.object_list.setMaximumHeight(34)
+        self.object_list = QtWidgets.QListWidget(objectName="objectList")
+        self.object_list.setFixedHeight(self.fontMetrics().height() + 6)
+        self.object_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.object_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.object_list.setTextElideMode(QtCore.Qt.ElideMiddle)
         lay.addWidget(self.object_list)
+        self.no_model_label = QtWidgets.QLabel("No model loaded", objectName="dim")
+        lay.addWidget(self.no_model_label)
         f = _form()
         self.dim_label = QtWidgets.QLabel("-", objectName="value")
         self.dim_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        f.addRow(QtWidgets.QLabel("Size (mm)", objectName="dim"), self.dim_label)
+        f.addRow(QtWidgets.QLabel("Size X \u00d7 Y \u00d7 Z", objectName="dim"), self.dim_label)
+        self.dim_label.setToolTip("Bounding box of the model in millimetres")
         self.tri_label = QtWidgets.QLabel("-", objectName="dim")
         f.addRow(QtWidgets.QLabel("Triangles", objectName="dim"), self.tri_label)
         lay.addLayout(f)
@@ -247,7 +264,7 @@ class LeftPanel(QtWidgets.QWidget):
         self.model_group = g
         f = _form()
         rot_row = QtWidgets.QHBoxLayout()
-        rot_row.setSpacing(4)
+        rot_row.setSpacing(theme.SP_S)
         self.rot_spins = []
         for axis in "XYZ":
             s = QtWidgets.QDoubleSpinBox()
@@ -257,8 +274,10 @@ class LeftPanel(QtWidgets.QWidget):
             s.setWrapping(True)
             s.setKeyboardTracking(False)
             s.setPrefix(f"{axis} ")
-            s.setMinimumWidth(62)
-            s.setToolTip(f"Rotation about {axis} (degrees)")
+            s.setMinimumWidth(60)
+            s.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            s.setSuffix("\u00b0")
+            s.setToolTip(f"Rotation about {axis} (degrees). Wheel or arrow keys: 15\u00b0 steps")
             s.valueChanged.connect(self._on_rotation)
             self.rot_spins.append(s)
             rot_row.addWidget(s)
@@ -280,10 +299,13 @@ class LeftPanel(QtWidgets.QWidget):
         f.addRow(QtWidgets.QLabel("Height", objectName="dim"), self.height_spin)
         lay.addLayout(f)
         row = QtWidgets.QHBoxLayout()
+        row.setSpacing(theme.SP_S + 2)
         self.plate_button = QtWidgets.QPushButton("Place on plate")
         self.plate_button.setToolTip("Center on the plate, lowest point at z = 0")
         self.plate_button.clicked.connect(self.project.place_on_plate)
         self.orient_button = QtWidgets.QPushButton("Suggest orientation")
+        self.orient_button.setToolTip("Rank several orientations by estimated support cost; "
+                                      "click one to apply it")
         self.orient_button.clicked.connect(self.orientRequested)
         row.addWidget(self.plate_button)
         row.addWidget(self.orient_button)
@@ -300,7 +322,9 @@ class LeftPanel(QtWidgets.QWidget):
         g, lay = _group("Mesh check")
         self.mesh_group = g
         row = QtWidgets.QHBoxLayout()
+        row.setSpacing(theme.SP_S + 2)
         self.check_button = QtWidgets.QPushButton("Check")
+        self.check_button.setToolTip("Check that the mesh is a closed, valid solid")
         self.check_button.clicked.connect(self.checkRequested)
         self.repair_button = QtWidgets.QPushButton("Repair")
         self.repair_button.setToolTip("Repair a copy of the mesh (the original is kept, undoable)")
@@ -320,12 +344,16 @@ class LeftPanel(QtWidgets.QWidget):
         f = _form()
         self.profile_combo = QtWidgets.QComboBox()
         self.profile_combo.setMaxVisibleItems(20)
+        # a long preset name must not widen the panel (full name in the list and tooltip)
+        self.profile_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.profile_combo.setMinimumContentsLength(10)
         self.rebuild_profile_combo()
         self.profile_combo.activated.connect(self._on_profile)
         f.addRow(QtWidgets.QLabel("Profile", objectName="dim"), self.profile_combo)
         # user presets: the buttons get their actions from the main window
         prow = QtWidgets.QHBoxLayout()
-        prow.setSpacing(4)
+        prow.setSpacing(theme.SP_S)
         self.save_preset_button = QtWidgets.QToolButton()
         self.save_preset_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.preset_menu_button = QtWidgets.QToolButton()
@@ -337,11 +365,13 @@ class LeftPanel(QtWidgets.QWidget):
             prow.addWidget(b)
         self.save_preset_button.hide()
         self.preset_menu_button.hide()
-        f.addRow(QtWidgets.QLabel("", objectName="dim"), prow)
+        f.addRow(prow)
         self.fields: dict[str, ParamField] = {}
         defaults = SupportParams().to_dict()
         checks = QtWidgets.QGridLayout()
-        checks.setHorizontalSpacing(6)
+        checks.setHorizontalSpacing(theme.SP_M)
+        checks.setVerticalSpacing(theme.SP_S + 2)
+        checks.setContentsMargins(0, theme.SP_XS, 0, 0)
         n_checks = 0
         for name in self.SIMPLE_FIELDS:
             pf = ParamField(name, defaults[name], self)
@@ -349,8 +379,14 @@ class LeftPanel(QtWidgets.QWidget):
             self.fields[name] = pf
             if isinstance(pf.widget, QtWidgets.QCheckBox):
                 pf.widget.setText(self.SIMPLE_LABELS[name])
-                checks.addWidget(pf.widget, n_checks // 2, n_checks % 2)
-                n_checks += 1
+                # short toggles side by side, longer ones on their own row (panel width)
+                if len(self.SIMPLE_LABELS[name]) <= 10:
+                    checks.addWidget(pf.widget, n_checks // 2, n_checks % 2)
+                    n_checks += 1
+                else:
+                    n_checks += n_checks % 2
+                    checks.addWidget(pf.widget, n_checks // 2, 0, 1, 2)
+                    n_checks += 2
             else:
                 f.addRow(QtWidgets.QLabel(self.SIMPLE_LABELS[name], objectName="dim"), pf.widget)
         lay.addLayout(f)
@@ -414,13 +450,15 @@ class LeftPanel(QtWidgets.QWidget):
         p = self.project
         has = p.has_model
         self.object_list.clear()
+        self.object_list.setVisible(has)
+        self.no_model_label.setVisible(not has)
         if has:
             label = p.name + ("  (repaired copy)" if p.base_is_repaired else "")
             item = QtWidgets.QListWidgetItem(label)
             item.setToolTip(p.source_path or "")
             self.object_list.addItem(item)
             d = p.dimensions()
-            self.dim_label.setText(f"{d[0]:.2f}  x  {d[1]:.2f}  x  {d[2]:.2f}")
+            self.dim_label.setText(f"{d[0]:.2f} \u00d7 {d[1]:.2f} \u00d7 {d[2]:.2f}")
             self.tri_label.setText(f"{len(p.mesh.faces):,}".replace(",", " "))
         else:
             self.dim_label.setText("-")
@@ -469,7 +507,7 @@ class LeftPanel(QtWidgets.QWidget):
             s.blockSignals(False)
         if p.has_model:
             d = p.dimensions()
-            self.dim_label.setText(f"{d[0]:.2f}  x  {d[1]:.2f}  x  {d[2]:.2f}")
+            self.dim_label.setText(f"{d[0]:.2f} \u00d7 {d[1]:.2f} \u00d7 {d[2]:.2f}")
 
     def refresh_params(self) -> None:
         p = self.project
@@ -497,12 +535,12 @@ class LeftPanel(QtWidgets.QWidget):
         for i, c in enumerate(self.candidates):
             crit = getattr(c, "criteria", {}) or {}
             rx, ry, rz = c.rotation_deg
-            parts = [f"#{i + 1}  rot {rx:.0f}/{ry:.0f}/{rz:.0f}"]
+            parts = [f"#{i + 1}  {rx:.0f}\u00b0 / {ry:.0f}\u00b0 / {rz:.0f}\u00b0"]
             if "overhang_area" in crit:
-                parts.append(f"overhang {crit['overhang_area']:.0f} mm2")
+                parts.append(f"overhang {crit['overhang_area']:.0f} mm\u00b2")
             if "height" in crit:
-                parts.append(f"h {crit['height']:.1f}")
-            item = QtWidgets.QListWidgetItem("   ".join(parts))
+                parts.append(f"h {crit['height']:.1f} mm")
+            item = QtWidgets.QListWidgetItem("  \u00b7  ".join(parts))
             tip = c.describe() if hasattr(c, "describe") else str(crit)
             item.setToolTip(tip)
             self.orient_list.addItem(item)
@@ -534,9 +572,10 @@ class ContactEditor(QtWidgets.QGroupBox):
         super().__init__("Selected contact", parent)
         self.project = project
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(8, 10, 8, 8)
-        self.empty = QtWidgets.QLabel("Click a contact in the 3D view to edit it.",
-                                      objectName="dim")
+        lay.setContentsMargins(theme.SP_M, theme.SP_M, theme.SP_M, theme.SP_M)
+        self.empty = QtWidgets.QLabel("Click a contact in the 3D view to edit it. Left click on "
+                                      "the model adds a manual contact, right click on a contact "
+                                      "deletes it.", objectName="dim")
         self.empty.setWordWrap(True)
         lay.addWidget(self.empty)
         self.body = QtWidgets.QWidget()
@@ -559,6 +598,9 @@ class ContactEditor(QtWidgets.QGroupBox):
         self.tip_spin.setKeyboardTracking(False)
         self.tip_spin.valueChanged.connect(self._on_tip)
         self.delete_button = QtWidgets.QPushButton("Delete contact")
+        self.delete_button.setIcon(icons.clear())
+        self.delete_button.setToolTip("Delete this contact (undoable; right click in the view "
+                                      "does the same)")
         self.delete_button.setObjectName("danger")
         self.delete_button.clicked.connect(self._on_delete)
         f.addRow(QtWidgets.QLabel("Contact", objectName="dim"), self.id_label)
@@ -584,7 +626,8 @@ class ContactEditor(QtWidgets.QGroupBox):
             return
         label, col = theme.REASON_STYLE.get(c.reason.value, (c.reason.value, "#fff"))
         self.id_label.setText(f"#{c.id}" + ("  (manual)" if c.manual else ""))
-        self.reason_label.setText(f"<span style='color:{col}'>&#9679;</span> {label}")
+        self.reason_label.setText(f"<span style='color:{col}; font-size:11pt'>&#9679;</span>"
+                                  f"&nbsp;{label}")
         p = c.position
         self.pos_label.setText(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f} mm")
         self.note_label.setText(c.note or "")
@@ -627,16 +670,22 @@ class RightPanel(QtWidgets.QWidget):
     def __init__(self, project: Project, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
         self.project = project
+        self.setObjectName("panel")
+        self.setAttribute(QtCore.Qt.WA_StyledBackground)
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setDrawBase(False)
 
         # --- advanced parameters -------------------------------------------------------
         inner = QtWidgets.QWidget()
-        root = QtWidgets.QVBoxLayout(inner)
-        root.setContentsMargins(8, 4, 8, 8)
-        root.setSpacing(4)
+        root = _panel_root(inner)
+        root.setContentsMargins(theme.SP_M, theme.SP_M, theme.SP_M, theme.SP_M)
         top = QtWidgets.QHBoxLayout()
+        top.setSpacing(theme.SP_S)
         self.profile_label = QtWidgets.QLabel("", objectName="dim")
+        self.profile_label.setWordWrap(True)
         self.reset_all_button = QtWidgets.QPushButton("Reset all")
+        self.reset_all_button.setIcon(icons.reset())
         self.reset_all_button.setToolTip("Reset every value to the profile")
         self.reset_all_button.clicked.connect(self._reset_all)
         self.save_preset_button = QtWidgets.QToolButton()
@@ -650,6 +699,10 @@ class RightPanel(QtWidgets.QWidget):
         self.reset_buttons: dict[str, QtWidgets.QPushButton] = {}
         defaults = SupportParams().to_dict()
         groups: dict[str, QtWidgets.QFormLayout] = {}
+        # one label column width for every group: the fields line up across sections
+        fm = self.fontMetrics()
+        label_w = min(max(fm.horizontalAdvance(m[1]) for m in PARAM_META.values()) + theme.SP_S,
+                      fm.horizontalAdvance("Branch max diameter") + theme.SP_S)
         for gname in GROUP_ORDER:
             g, lay = _group(gname)
             f = _form()
@@ -662,32 +715,42 @@ class RightPanel(QtWidgets.QWidget):
             pf = ParamField(name, defaults[name], self)
             pf.edited.connect(self.project.set_param)
             self.fields[name] = pf
-            reset = QtWidgets.QPushButton("reset", objectName="small")
-            reset.setToolTip("Back to the profile value")
-            reset.setFixedWidth(48)
+            reset = QtWidgets.QPushButton(objectName="reset")
+            reset.setIcon(icons.reset())
+            reset.setIconSize(QtCore.QSize(14, 14))
+            reset.setToolTip(f"{pf.label}: back to the profile value")
+            reset.setAccessibleName(f"Reset {pf.label}")
+            reset.setFixedSize(theme.ICON_BUTTON, theme.ICON_BUTTON)
             reset.clicked.connect(lambda _=False, n=name: self.project.reset_param(n))
             self.reset_buttons[name] = reset
             row = QtWidgets.QHBoxLayout()
-            row.setSpacing(4)
+            row.setSpacing(theme.SP_S)
             row.addWidget(pf.widget, 1)
             row.addWidget(reset)
-            lab = QtWidgets.QLabel(pf.label)
+            lab = QtWidgets.QLabel(pf.label, objectName="paramLabel")
+            lab.setFixedWidth(label_w)
+            lab.setWordWrap(True)           # the few longer labels take two lines
             lab.setToolTip(pf.widget.toolTip())
             groups[gname].addRow(lab, row)
         root.addStretch(1)
         self.tabs.addTab(_scroll(inner), "Advanced")
 
         # --- contacts & issues ------------------------------------------------------------
-        inner2 = QtWidgets.QWidget()
-        r2 = QtWidgets.QVBoxLayout(inner2)
-        r2.setContentsMargins(8, 4, 8, 8)
+        inner2 = QtWidgets.QWidget(objectName="panel")
+        inner2.setAttribute(QtCore.Qt.WA_StyledBackground)
+        r2 = _panel_root(inner2)
         self.contact_editor = ContactEditor(project)
         r2.addWidget(self.contact_editor)
         g, lay = _group("Issues")
         self.issue_summary = QtWidgets.QLabel("No generation yet", objectName="dim")
         lay.addWidget(self.issue_summary)
-        self.issue_list = QtWidgets.QListWidget()
+        self.issue_summary.setTextFormat(QtCore.Qt.RichText)
+        self.issue_list = QtWidgets.QListWidget(objectName="issueList")
         self.issue_list.setWordWrap(True)
+        self.issue_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.issue_list.setResizeMode(QtWidgets.QListView.Adjust)
+        self.issue_list.setIconSize(QtCore.QSize(14, 14))
+        self.issue_list.setCursor(QtCore.Qt.PointingHandCursor)
         self.issue_list.setToolTip("Click an issue to show it in the 3D view")
         self.issue_list.itemClicked.connect(self._on_issue)
         self.issue_list.setMinimumHeight(160)
@@ -696,7 +759,7 @@ class RightPanel(QtWidgets.QWidget):
         self.tabs.addTab(inner2, "Contacts and issues")
 
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setContentsMargins(0, theme.SP_S, 0, 0)
         outer.addWidget(self.tabs)
         self._issues: list = []
         self.refresh_params()
@@ -707,8 +770,9 @@ class RightPanel(QtWidgets.QWidget):
         base = p.profile_params()
         prof = p.profiles.get(p.profile_key)
         kind = "Preset" if is_user_key(p.profile_key) else "Profile"
-        self.profile_label.setText(f"{kind}: {prof.label if prof else '-'}"
-                                   + (f"   <span style='color:{theme.AMBER}'>"
+        self.profile_label.setText(f"{kind}: <b style='color:{theme.TEXT_STRONG}'>"
+                                   f"{prof.label if prof else '-'}</b>"
+                                   + (f"<br><span style='color:{theme.AMBER}'>"
                                       f"{len(changed)} changed</span>" if changed else ""))
         self.reset_all_button.setEnabled(bool(changed))
         for name, pf in self.fields.items():
@@ -726,26 +790,37 @@ class RightPanel(QtWidgets.QWidget):
         self._issues = list(issues)
         self.issue_list.clear()
         sev_order = {"error": 0, "warning": 1, "info": 2}
-        icons = {"error": theme.ERROR, "warning": theme.WARNING, "info": theme.TEXT_DIM}
+        colours = {"error": theme.ERROR, "warning": theme.WARNING, "info": theme.TEXT_DIM}
         # indexes come from enumerate: Issue holds numpy arrays, list.index / == on it is
         # ambiguous and two identical messages are legitimate (QA-7)
         order = sorted(range(len(self._issues)),
                        key=lambda k: (sev_order.get(self._issues[k].severity, 3), k))
         for idx in order:
             i = self._issues[idx]
-            item = QtWidgets.QListWidgetItem(f"{i.severity.upper()}  {i.message}")
-            item.setForeground(QtGui.QBrush(QtGui.QColor(icons.get(i.severity, theme.TEXT))))
+            item = QtWidgets.QListWidgetItem(icons.severity(i.severity), i.message)
+            if i.severity != "info":
+                item.setForeground(QtGui.QBrush(QtGui.QColor(colours.get(i.severity, theme.TEXT))))
             item.setData(QtCore.Qt.UserRole, idx)
-            if i.position is None and i.contact_id is None:
-                item.setToolTip("No position attached")
+            where = ("No position attached" if i.position is None and i.contact_id is None
+                     else "Click to show it in the 3D view")
+            item.setToolTip(f"{i.severity.capitalize()} [{i.code}]\n{where}")
             self.issue_list.addItem(item)
+        ne = sum(1 for i in issues if i.severity == "error")
+        nw = sum(1 for i in issues if i.severity == "warning")
+        ni = len(issues) - ne - nw
         if not has_result:
             self.issue_summary.setText("No generation yet")
+        elif not issues:
+            self.issue_summary.setText(f"<span style='color:{theme.OK}'>&#10003;</span> "
+                                       "No issue found")
         else:
-            ne = sum(1 for i in issues if i.severity == "error")
-            nw = sum(1 for i in issues if i.severity == "warning")
-            self.issue_summary.setText(f"{ne} error(s), {nw} warning(s)" if issues
-                                       else "No issue found")
+            def part(n, word, col):
+                c = col if n else theme.TEXT_DIM
+                return f"<span style='color:{c}'><b>{n}</b> {word}</span>"
+            self.issue_summary.setText("&nbsp;&nbsp;&middot;&nbsp;&nbsp;".join(
+                (part(ne, "error(s)", theme.ERROR), part(nw, "warning(s)", theme.WARNING),
+                 part(ni, "info", theme.TEXT))))
+        self.tabs.setTabText(1, "Contacts and issues" + (f" ({ne + nw})" if ne + nw else ""))
 
     def _on_issue(self, item: QtWidgets.QListWidgetItem) -> None:
         idx = item.data(QtCore.Qt.UserRole)

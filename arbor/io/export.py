@@ -39,6 +39,7 @@ from __future__ import annotations
 import datetime as _dt
 import io
 import json
+import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -325,8 +326,10 @@ BBS_MODEL_CONFIG = "Metadata/model_settings.config"
 CONFIG_CT = "application/xml"
 
 
-def _model_settings_config(objects: Sequence[tuple[int, str, Optional[float]]]) -> bytes:
-    """Metadata/model_settings.config declaring each (object id, name, layer height).
+def _model_settings_config(objects: Sequence[tuple[int, str, Optional[float]]],
+                           extra: Optional[dict[str, str]] = None) -> bytes:
+    """Metadata/model_settings.config declaring each (object id, name, layer height),
+    plus the same ``extra`` key/value settings on every object.
     The part id is the object id: each object is a single <mesh> object."""
     root = ET.Element("config")
     for oid, name, lh in objects:
@@ -335,6 +338,8 @@ def _model_settings_config(objects: Sequence[tuple[int, str, Optional[float]]]) 
         ET.SubElement(o, "metadata", key="extruder", value="1")
         if lh is not None:
             ET.SubElement(o, "metadata", key="layer_height", value=f"{lh:g}")
+        for k, v in (extra or {}).items():
+            ET.SubElement(o, "metadata", key=k, value=v)
         p = ET.SubElement(o, "part", id=str(oid), subtype="normal_part")
         ET.SubElement(p, "metadata", key="name", value=name)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
@@ -356,6 +361,32 @@ def _check_layer_heights(layer_heights) -> dict[str, float]:
     return out
 
 
+_SETTING_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_RESERVED_SETTINGS = ("name", "extruder", "layer_height", "module")
+
+
+def _check_object_settings(object_settings) -> dict[str, str]:
+    """Validate per-object OrcaSlicer / Bambu Studio settings: {key: value} with plain
+    config keys; values are written as text (bools as 0/1)."""
+    if not object_settings:
+        return {}
+    out = {}
+    for k, v in dict(object_settings).items():
+        if not isinstance(k, str) or not _SETTING_KEY.match(k):
+            raise ValueError(f"object_settings: invalid key {k!r}")
+        if k in _RESERVED_SETTINGS:
+            raise ValueError(f"object_settings: {k!r} is managed by the exporter "
+                             "(use layer_heights for the layer height)")
+        if isinstance(v, bool):
+            v = "1" if v else "0"
+        elif isinstance(v, (int, float)) and np.isfinite(v):
+            v = f"{v:g}"
+        elif not isinstance(v, str):
+            raise ValueError(f"object_settings[{k!r}]: unsupported value {v!r}")
+        out[k] = v
+    return out
+
+
 def _rels() -> bytes:
     root = ET.Element("Relationships", xmlns=REL_NS)
     ET.SubElement(root, "Relationship", Target="/" + MODEL_PATH, Id="rel0", Type=START_PART_REL)
@@ -366,7 +397,8 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
                raft: Optional[trimesh.Trimesh] = None, params=None, model_name: str = "model",
                *, layout: str = "objects", positive_octant: bool = True,
                title: Optional[str] = None, weld: bool = True,
-               layer_heights: Optional[dict] = None) -> ExportResult:
+               layer_heights: Optional[dict] = None,
+               object_settings: Optional[dict] = None) -> ExportResult:
     """Write model (+ supports, + raft) to a 3MF package. Input meshes are in plate
     coordinates (mm, z up) and are not modified. ``weld``: see :func:`weld_for_export`
     (actions reported in ``ExportResult.notes``).
@@ -374,13 +406,19 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
     ``layout``: ``"objects"`` (default), ``"components"`` or ``"separate"`` (see the
     module docstring). ``layer_heights`` (only with ``"separate"``): ``{"model": mm,
     "supports": mm}``, written as per-object ``layer_height`` for OrcaSlicer / Bambu
-    Studio in ``Metadata/model_settings.config``; either key may be omitted."""
+    Studio in ``Metadata/model_settings.config``; either key may be omitted.
+    ``object_settings`` (only with ``"separate"``): other per-object settings written on
+    every object of that file, e.g. ``{"enable_support": False}`` (OrcaSlicer applies
+    them to the object configuration, also for a 3MF that is not an Orca project; see
+    docs/SLICERS.md)."""
     if layout not in LAYOUTS:
         raise ValueError(f"layout must be one of {', '.join(LAYOUTS)}")
     lh = _check_layer_heights(layer_heights)
-    if lh and layout != "separate":
-        raise ValueError("layer_heights needs layout='separate' (otherwise slicers merge or "
-                         "drop the objects and the per-object settings break the alignment)")
+    extra = _check_object_settings(object_settings)
+    if (lh or extra) and layout != "separate":
+        raise ValueError("layer_heights / object_settings need layout='separate' (otherwise "
+                         "slicers merge or drop the objects and the per-object settings break "
+                         "the alignment)")
     path = Path(path)
     parts: list[tuple[str, trimesh.Trimesh]] = []
     if model is None or len(model.faces) == 0:
@@ -457,12 +495,17 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
     out.write("</build>\n</model>\n")
 
     extra_files: dict[str, bytes] = {}
-    if lh:
+    if lh or extra:
         extra_files[BBS_MODEL_CONFIG] = _model_settings_config(
-            [(i, oname, lh.get(role)) for i, (oname, role, _m) in enumerate(groups, start=1)])
+            [(i, oname, lh.get(role)) for i, (oname, role, _m) in enumerate(groups, start=1)],
+            extra)
+    if lh:
         notes.append("OrcaSlicer / Bambu Studio per-object layer height: " + ", ".join(
             f"{oname} = {lh[role]:g} mm" for oname, role, _m in groups if role in lh)
             + " (Metadata/model_settings.config; other slicers use their own setting).")
+    if extra:
+        notes.append("OrcaSlicer / Bambu Studio per-object settings on every object: " + ", ".join(
+            f"{k} = {v}" for k, v in extra.items()) + " (Metadata/model_settings.config).")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".part")

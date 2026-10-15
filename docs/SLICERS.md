@@ -17,7 +17,7 @@ Consulté le 2026-10-15. Les § 1 à 5 viennent de la lecture du code source des
 | Disposition `separate` (`--layout separate`) | deux objets **qui touchent tous les deux le plateau** : `<nom>` et `<nom> supports + raft` (radeau et supports dans le même maillage) ; les arbres posés uniquement sur le modèle vont dans l'objet modèle. Option : `Metadata/model_settings.config` avec une hauteur de couche par objet (Orca/Bambu). Cf. § « Cause trouvée » |
 | Position | modèle et supports en coordonnées plateau ; le modèle **ne touche pas** le plateau quand il repose sur ses supports (z min modèle > 0) |
 | Maillages | chaque pièce est fermée et 2-manifold ; les sommets à moins de 1e-5 mm sont soudés à l'écriture (cf. § 4) |
-| Extensions | aucune (ni `Slic3r_PE_model.config`, ni Production) ; `Metadata/model_settings.config` (Orca/Bambu) seulement avec `--layout separate` et une hauteur de couche par objet |
+| Extensions | aucune (ni `Slic3r_PE_model.config`, ni Production) ; `Metadata/model_settings.config` (Orca/Bambu) seulement avec `--layout separate` et une hauteur de couche par objet, et dans le fichier « Open in OrcaSlicer » (`enable_support = 0` par objet, dernière section) |
 | Métadonnées | `Application`, `Title`, `CreationDate`, `arbor:support_params` (namespace déclaré) |
 
 ## 2. Comportement attendu par slicer (lecture de code, non testé)
@@ -139,3 +139,77 @@ Dans OrcaSlicer 2.4.2 (A1 mini, buse 0,2, supports Orca désactivés), Fichier >
 6. Refaire l'import avec le fichier `--layout objects` et noter si le dialogue « Multi-part object detected » apparaît (point 3 de la cause).
 
 [^orca242]: OrcaSlicer, tag `v2.4.2` (commit `8500fcdccaa10b5099ac20d252af3a7c560046f1`) : <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/Plater.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Model.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Format/bbs_3mf.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/GCode.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Print.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/OrcaSlicer.cpp>. Binaire essayé : `OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage` (release GitHub v2.4.2).
+
+## Ouvrir dans OrcaSlicer (bouton « Open in OrcaSlicer », `arborfdm-cli generate ... --open-in-orca`)
+
+Code lu au tag `v2.4.2` d'OrcaSlicer (mêmes fichiers que [^orca242], plus `src/slic3r/GUI/GUI_App.cpp`, `InstanceCheck.cpp`, `AppConfig.cpp`, `Preferences.cpp`, `CMakeLists.txt`, `scripts/flatpak/com.orcaslicer.OrcaSlicer.yml`) [^orcalaunch]. Numéros de ligne de ce tag.
+
+### Fonctionnement
+
+1. ArborFDM écrit un 3MF dans un **dossier dédié**, jamais à côté ni à la place du modèle source : `%LOCALAPPDATA%\ArborFDM\to_slicer` (Windows), `~/.local/share/arborfdm/to_slicer` (Linux, `$XDG_DATA_HOME`), `~/Library/Application Support/ArborFDM/to_slicer` (macOS) ; variable `ARBOR_TO_SLICER_DIR` pour changer. Nom `<modèle>_<AAAAMMJJ-HHMMSS>.3mf`, unique (création exclusive, suffixe `_2`, `_3`... si besoin). Les plus anciens sont supprimés au-delà de 20, **uniquement** les fichiers écrits par ArborFDM et non modifiés depuis (marque `Application=ArborFDM` dans `3D/3dmodel.model`) : un projet qu'Orca aurait réenregistré par-dessus n'est jamais supprimé.
+2. Disposition `separate` (§ « Solution ») : 2 objets posés sur le plateau, `<nom>` et `<nom> supports + raft`. Hauteurs de couche par objet en option (`layer_heights`).
+3. **Supports Orca désactivés par objet** : `Metadata/model_settings.config` contient `enable_support = 0` sur chaque objet (cf. « Doublons » ci-dessous).
+4. Lancement non bloquant : `orca-slicer.exe <fichier>` (Windows, processus détaché), `<AppImage ou binaire> <fichier>` (Linux, nouvelle session), `open -a OrcaSlicer.app <fichier>` (macOS). L'utilisateur continue dans Orca (imprimante, filament, tranchage).
+
+### Pourquoi passer simplement le chemin du fichier
+
+- `orca-slicer <fichier>` sans option d'action démarre l'interface : `start_gui = m_actions.empty()` (`src/OrcaSlicer.cpp` l. 1365), puis `GUI_App::post_init` appelle `Plater::load_files` avec les fichiers (`GUI_App.cpp` l. 758-783). Pas d'autre option nécessaire.
+- Un seul 3MF : `Plater::open_3mf_file` (`Plater.cpp` l. 14345). Comportement par défaut « demander si pertinent » (`AppConfig.cpp` l. 513) : sur un plateau **vide** le fichier est ouvert comme projet (`load_project`), sans question ; notre 3MF n'étant pas un projet Orca, seule la géométrie est importée, sans message (`Plater.cpp` l. 6180-6187), les préréglages (imprimante, filament, process) de l'utilisateur restent ceux en cours.
+- **Instance unique** : désactivée par défaut (`AppConfig.cpp` l. 172, préférence « Allow only one OrcaSlicer instance », `Preferences.cpp` l. 1554) : chaque clic ouvre **une nouvelle fenêtre** Orca. Si l'utilisateur l'active, la ligne de commande est transmise à l'instance ouverte, qui charge le fichier dans son plateau (`EVT_LOAD_MODEL_OTHER_INSTANCE`, `Plater.cpp` l. 5434) ; plateau non vide : Orca demande « ouvrir comme projet / importer la géométrie » (`Plater.cpp` l. 14352). Les options `--single-instance` / `--no-single-instance` existent (`InstanceCheck.cpp` l. 72) mais ArborFDM ne les passe pas : la préférence de l'utilisateur s'applique.
+- macOS : `open -a` passe par `GUI_App::MacOpenFiles` ; sans instance unique, un 3MF ouvert alors qu'Orca tourne démarre une nouvelle instance (`GUI_App.cpp` l. 8591).
+- Position : Orca recentre la scène entière sur le plateau (même décalage XY pour tous les objets, `Model::center_instances_around_point`, `Plater.cpp` l. 6795, `Model.cpp` l. 704) et pose chaque objet sur le plateau (l. 6779) : les deux objets touchant déjà le plateau, **positions relatives, orientation et échelle sont conservées** (unité `millimeter`, aucune mise à l'échelle).
+- Le fichier ouvert devient le nom du projet (`set_project_filename`, `Plater.cpp` l. 12186) : **« Enregistrer » dans Orca écrit dans le dossier `to_slicer`**. Pour garder le projet, utiliser « Enregistrer sous » ailleurs (le nettoyage ne supprime de toute façon pas un fichier réenregistré par Orca).
+
+### Pourquoi 3MF et pas STL
+
+| | 3MF (`separate`) | STL |
+|---|---|---|
+| Objets séparés | oui, un `<object>` + `<item>` chacun | non : un seul maillage par fichier (format sans liste d'objets) |
+| Position relative | conservée (même décalage pour toute la scène, ci-dessus) | perdue avec deux STL : chaque objet non 3MF est recentré (`center_around_origin`, `Plater.cpp` l. 6765-6766) ; un seul STL fusionne modèle et supports en un objet |
+| Unités | `unit="millimeter"` explicite (3MF Core, `<model unit>`) | aucune ; Orca suppose des mm |
+| Réglages par objet (supports Orca off, hauteur de couche) | oui, `Metadata/model_settings.config`, lu pour tout 3MF | impossible (seul le réglage global du process) |
+
+Conclusion : **3MF, disposition `separate`**.
+
+### Doublons avec les supports automatiques d'Orca
+
+- `enable_support` est une option de `PrintObjectConfig` (`PrintConfig.hpp` l. 948), donc réglable par objet. Le lecteur 3MF lit `Metadata/model_settings.config` pour **tout** 3MF (`bbs_3mf.cpp` l. 1952-1960) et met chaque `<metadata key value>` d'un `<object>` dans la configuration de l'objet (`set_deserialize`, l. 2131). Pour un 3MF « autre » (le nôtre), `Plater` ne remet pas cette configuration à zéro (la remise à zéro, l. 6193-6215, est dans une autre branche que `From_Other`, l. 6180).
+- **Vérifié avec la CLI d'Orca 2.4.2** (AppImage, préréglages A1 mini 0,2, **process avec `enable_support = 1`, support `tree(auto)`**), figurine + radeau, hauteurs 0,06 / 0,12 :
+  - fichier `export_for_slicer` (avec `enable_support = 0` par objet) : G-code sans aucune ligne `; FEATURE: Support` ; le projet réexporté par Orca garde `enable_support = 0` sur les deux objets alors que le process global vaut 1 ;
+  - même fichier sans ce réglage (`disable_slicer_supports=False`) : 859 `; FEATURE: Support` + 55 `; FEATURE: Support interface` (supports Orca ajoutés en double) et l'erreur Orca « Potentially lost branch! ».
+- Le réglage reste visible et modifiable dans Orca (réglages de l'objet, onglet « Objet » du process). Les autres slicers ignorent ce fichier : y désactiver les supports à la main.
+
+### Détection d'OrcaSlicer (`find_orcaslicer`, `candidate_paths`)
+
+Ordre : chemin configuré (s'il est valide) ; puis exécutables `orca-slicer`, `OrcaSlicer`, `orcaslicer` dans le `PATH` ; puis par plateforme :
+
+- **Windows** : l'installateur est NSIS via CPack (`CMakeLists.txt` l. 931-965 : `CPACK_PACKAGE_VENDOR "SoftFever"`, `CPACK_PACKAGE_INSTALL_REGISTRY_KEY "OrcaSlicer"`, exécutable `orca-slicer.exe`). Le modèle NSIS de CMake écrit `HKLM` ou `HKCU\Software\SoftFever\OrcaSlicer` (valeur par défaut = dossier d'installation) et `...\Uninstall\OrcaSlicer` (`UninstallString`, `DisplayIcon`) [^cpacknsis] : ces clés sont lues (vues 64 et 32 bits). `App Paths\orca-slicer.exe` est aussi lu, mais l'installateur ne l'écrit pas d'après ce modèle. Dossiers : `%ProgramW6432%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` `\OrcaSlicer\orca-slicer.exe`, `%LOCALAPPDATA%\Programs\OrcaSlicer`, `%USERPROFILE%\Documents\OrcaSlicer` (installation « pour moi seulement » de CPack NSIS : `$DOCUMENTS\OrcaSlicer`), `%OneDrive%\Documents\OrcaSlicer`, Scoop `~\scoop\apps\orcaslicer\current` (non vérifié). **Version portable (zip)** : pas de détection, indiquer le chemin.
+- **Linux** : flatpak `com.orcaslicer.OrcaSlicer` (identifiant du manifeste v2.4.2) et l'ancien `io.github.softfever.OrcaSlicer`, via les lanceurs exportés `~/.local/share/flatpak/exports/bin/<id>` et `/var/lib/flatpak/exports/bin/<id>` (le flatpak a `--filesystem=home`, il voit donc le dossier `to_slicer`) ; `/usr/bin`, `/usr/local/bin`, `/opt/OrcaSlicer/bin`, `/opt/orcaslicer/bin` ; AppImage `*orca*.AppImage` (le plus récent) dans `~/Applications`, `~/AppImages`, `~/Downloads`, `~/Desktop`, `~/.local/bin`, `~/bin`, `/opt`. Une AppImage non exécutable est signalée (`chmod +x`).
+- **macOS** : `/Applications/OrcaSlicer.app`, `~/Applications/OrcaSlicer.app` (non essayé).
+
+Chemin manuel : réglage `orca_path` de `%APPDATA%\ArborFDM\settings.json` (Linux `~/.config/arborfdm/settings.json`), écrit par la GUI ou par `arborfdm-cli orca --set-path "C:\...\orca-slicer.exe"` ; `arborfdm-cli orca --clear-path` revient à la détection ; `arborfdm-cli orca --find` affiche le programme trouvé ou la liste des emplacements essayés. Un chemin configuré invalide est ignoré (avertissement) et la détection prend le relais ; `--orca-path` invalide en CLI est une erreur.
+
+Erreurs : programme introuvable ou invalide → `SlicerNotFound` ; fichier absent, échec du lancement ou sortie immédiate avec un code d'erreur → `SlicerLaunchError`. Le fichier exporté reste dans `to_slicer` et son chemin est affiché : l'utilisateur peut l'ouvrir à la main (Fichier > Importer). Si ArborFDM est gelé (PyInstaller), les chemins de bibliothèques ajoutés par PyInstaller (`LD_LIBRARY_PATH`, `PATH` vers `_MEIPASS`, `QT_PLUGIN_PATH`) sont retirés de l'environnement passé à Orca.
+
+### Essai réel de l'interface (Linux, conteneur)
+
+`launch_orcaslicer(fichier, AppRun)` sur l'AppImage 2.4.2 extraite, sous Xvfb, profil Orca vierge : la fenêtre s'ouvre, le journal d'Orca montre `post_init, init with input files, size 1` puis `load_project` puis « 3MF has no slicer metadata/project config, importing geometry only » ; la liste d'objets affiche **2 objets** `figurine` et `figurine supports + raft` sur « Plate 1 », aucune question « Multi-part object », titre de fenêtre = nom du fichier. L'assistant de premier lancement d'Orca s'affiche par-dessus (profil vierge). Premier essai : Orca a refusé de démarrer faute de locale `en_US` dans le conteneur (message « Switching Orca Slicer to language en_US failed ») ; ce n'est pas un problème d'ArborFDM. Non essayé : Windows, macOS, flatpak, instance unique.
+
+### Limites
+
+- Dans Orca, objets séparés à la même hauteur de couche : avertissement « Conflicts of G-code paths » attendu (pointes qui pénètrent le modèle, § « Cause trouvée » point 7). Avec 0,06 / 0,12 sur la figurine actuelle, la CLI d'Orca le signale aussi (`--no-check` nécessaire en CLI) ; dans l'interface c'est un « Serious warning » d'après le code, effet sur le bouton d'impression non vérifié.
+- Le décalage XY appliqué par Orca (recentrage) est voulu ; la position absolue sur le plateau n'est pas celle d'ArborFDM.
+- Profil d'imprimante / buse : choisis dans Orca, pas transmis (la buse doit correspondre au profil ArborFDM, cf. essai A1 mini).
+
+### Vérification à faire sous Windows (A1 mini, Orca 2.4.2)
+
+1. `arborfdm-cli orca --find` : doit afficher `C:\Program Files\OrcaSlicer\orca-slicer.exe` (ou l'emplacement réel). Sinon noter la sortie et l'emplacement d'Orca, puis `arborfdm-cli orca --set-path "<chemin>\orca-slicer.exe"`.
+2. Orca fermé : `arborfdm-cli generate examples\figurine.stl --profile nozzle_02_normal --set raft_enabled=true --open-in-orca --model-layer-height 0.06 --support-layer-height 0.12`. Orca s'ouvre seul ; noter le temps et tout dialogue.
+3. Liste d'objets : 2 objets `figurine` et `figurine supports + raft`, pas de « Multi-part object detected ». Vue de côté : pointes contre le modèle, rien n'a bougé en Z.
+4. Process, onglet « Objet », sur chaque objet : « Enable support » décoché ; hauteur de couche 0,06 / 0,12. Cocher « Enable support » dans le process global : les objets doivent rester sans supports Orca. Trancher : aperçu sans supports Orca en plus des arbres.
+5. Orca déjà ouvert : relancer la commande. Attendu : une **deuxième fenêtre** (instance unique désactivée par défaut). Puis, avec « Préférences > Allow only one OrcaSlicer instance » activé : le fichier doit arriver dans la fenêtre existante (question projet / géométrie si le plateau n'est pas vide).
+6. Renommer temporairement le dossier d'Orca (ou `--orca-path C:\nope.exe`) : message clair, fichier quand même écrit dans `%LOCALAPPDATA%\ArborFDM\to_slicer`.
+7. Vérifier que le modèle source (`examples\figurine.stl`) n'a pas changé (date de modification) et qu'aucun fichier n'a été créé à côté.
+
+[^orcalaunch]: OrcaSlicer tag `v2.4.2` : <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/OrcaSlicer.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/GUI_App.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/InstanceCheck.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/Plater.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/AppConfig.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/Preferences.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Format/bbs_3mf.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/PrintConfig.hpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/CMakeLists.txt>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/scripts/flatpak/com.orcaslicer.OrcaSlicer.yml>.
+[^cpacknsis]: CMake `Modules/Internal/CPack/NSIS.template.in` (v3.31.0) : `WriteRegStr SHCTX "Software\@CPACK_PACKAGE_VENDOR@\@CPACK_PACKAGE_INSTALL_REGISTRY_KEY@" "" $INSTDIR`, clés `Uninstall\...`, `$DOCUMENTS\...` pour une installation « JustMe », <https://github.com/Kitware/CMake/blob/v3.31.0/Modules/Internal/CPack/NSIS.template.in> ; racine par défaut `$PROGRAMFILES64` en 64 bits (`Modules/CPack.cmake`).

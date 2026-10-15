@@ -49,15 +49,18 @@ Repère unique : millimètres, Z vers le haut, plateau en z = 0.
 
 ## 4. Dépendances et licences
 
+Inventaire complet (versions testées, bibliothèques natives embarquées, obligations LGPL, choix de licence) : `docs/LICENSES.md`. Notices livrées avec le binaire : `THIRD_PARTY_NOTICES.md` et `THIRD_PARTY_NOTICES.txt` (généré par `packaging/collect_notices.py`).
+
 | Paquet | Usage | Licence |
 |---|---|---|
-| numpy, scipy | calcul vectoriel, KD-tree | BSD-3 |
+| numpy, scipy | calcul vectoriel, KD-tree | BSD-3 (OpenBLAS BSD-3 et runtime GCC GPL-3 avec exception, embarqués) |
 | trimesh | structure de maillage, slicing, ray casting | MIT |
 | manifold3d | union booléenne robuste des supports | Apache-2.0 |
-| shapely | polygones de couches (différences, aires) | BSD-3 |
+| shapely | polygones de couches (différences, aires) | BSD-3 ; embarque GEOS en LGPL-2.1 (DLL séparées) |
 | networkx | composantes, graphes (dépendance de trimesh) | BSD-3 |
-| PySide6 | interface | LGPL-3.0 (dynamique) |
+| PySide6, shiboken6 (Qt 6) | interface | LGPL-3.0 (liaison dynamique, onedir) |
 | pyqtgraph, PyOpenGL | viewport 3D | MIT / BSD |
-| pytest, PyInstaller (dev) | tests, packaging | MIT / GPL avec exception bootloader |
+| pytest, lxml, rtree (dev) | tests (lxml : lecture 3MF ; rtree : requêtes de proximité de trimesh dans les tests) | MIT / BSD-3 / MIT |
+| PyInstaller (dev) | packaging | GPL-2.0 avec exception bootloader |
 
-rtree et lxml ont été écartés (bibliothèques natives supplémentaires sans bénéfice mesuré).
+Le moteur n'utilise ni rtree ni lxml (bibliothèques natives supplémentaires sans bénéfice mesuré) ; ils ne servent qu'aux tests et sont exclus du build.

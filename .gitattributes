@@ -1,1 +1,10 @@
+* text=auto
 *.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.stl binary
+*.3mf binary
+*.arbor binary
+*.png binary
+*.zip binary

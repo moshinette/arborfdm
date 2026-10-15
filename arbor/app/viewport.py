@@ -19,7 +19,7 @@ from OpenGL import GL
 from pyqtgraph.opengl import shaders
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from . import overhang, theme
+from . import icons, overhang, theme
 from .picking import BackgroundPicker
 
 try:        # pyqtgraph >= 0.14 uploads vertex buffers only when flagged dirty
@@ -134,21 +134,32 @@ class FaceColorMeshItem(gl.GLMeshItem):
         return bits
 
 
+def overlay_style(extra: str = "") -> str:
+    """Stylesheet of the cards drawn over the 3D view (legends, progress)."""
+    return (f"QFrame {{ background: {theme.OVERLAY_BG}; border: 1px solid {theme.BORDER};"
+            f" border-radius: {theme.R_L}px; }} QLabel {{ border: none; background: transparent;"
+            f" font-size: {theme.FS_SMALL}pt; }} " + extra)
+
+
+def _overlay_title(text: str = "") -> QtWidgets.QLabel:
+    lab = QtWidgets.QLabel(text)
+    lab.setStyleSheet(f"color: {theme.TEXT_STRONG}; font-weight: 600; border: none;"
+                      f" font-size: {theme.FS_SMALL}pt;")
+    return lab
+
+
 class OverhangLegend(QtWidgets.QFrame):
     """Angle bands of the overhang colouring, with the area of each band."""
 
     def __init__(self, parent: QtWidgets.QWidget):
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.setStyleSheet("QFrame { background: rgba(22,24,29,215); border: 1px solid #323743;"
-                           " border-radius: 6px; } QLabel { border: none; background: transparent;"
-                           " font-size: 8.5pt; }")
+        self.setStyleSheet(overlay_style())
         lay = QtWidgets.QGridLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setHorizontalSpacing(6)
-        lay.setVerticalSpacing(2)
-        self.title = QtWidgets.QLabel("")
-        self.title.setStyleSheet("color: white; font-weight: 600; border: none;")
+        lay.setContentsMargins(theme.SP_M + 2, theme.SP_M - 2, theme.SP_M + 2, theme.SP_M - 2)
+        lay.setHorizontalSpacing(theme.SP_M)
+        lay.setVerticalSpacing(theme.SP_XS + 1)
+        self.title = _overlay_title()
         lay.addWidget(self.title, 0, 0, 1, 3)
         self.range_labels: dict[str, QtWidgets.QLabel] = {}
         self.area_labels: dict[str, QtWidgets.QLabel] = {}
@@ -161,14 +172,14 @@ class OverhangLegend(QtWidgets.QFrame):
             name = QtWidgets.QLabel("")
             area = QtWidgets.QLabel("")
             area.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            area.setStyleSheet("color: #c8ccd4; border: none;")
+            area.setStyleSheet(f"color: {theme.TEXT}; border: none;")
             lay.addWidget(dot, r, 0)
             lay.addWidget(name, r, 1)
             lay.addWidget(area, r, 2)
             self.range_labels[key] = name
             self.area_labels[key] = area
         note = QtWidgets.QLabel("Angle from vertical. Faces on the plate are ignored.")
-        note.setStyleSheet("color: #8a92a3; border: none; font-size: 8pt;")
+        note.setStyleSheet(f"color: {theme.TEXT_DIM}; border: none; font-size: 8pt;")
         lay.addWidget(note, len(overhang.BAND_KEYS) + 1, 0, 1, 3)
         self.set_state(55.0, None)
 
@@ -187,18 +198,28 @@ class Legend(QtWidgets.QFrame):
     def __init__(self, parent: QtWidgets.QWidget):
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.setStyleSheet("QFrame { background: rgba(22,24,29,210); border: 1px solid #323743;"
-                           " border-radius: 6px; } QLabel { border: none; background: transparent;"
-                           " font-size: 8.5pt; }")
+        self.setStyleSheet(overlay_style())
         lay = QtWidgets.QGridLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setHorizontalSpacing(6)
-        lay.setVerticalSpacing(2)
+        lay.setContentsMargins(theme.SP_M + 2, theme.SP_M - 2, theme.SP_M + 2, theme.SP_M - 2)
+        lay.setHorizontalSpacing(theme.SP_M)
+        lay.setVerticalSpacing(theme.SP_XS + 1)
         self.count_labels: dict[str, QtWidgets.QLabel] = {}
+        self.title = _overlay_title("Contacts")
+        self.total_label = _overlay_title("0")
+        self.total_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        lay.addWidget(self.title, 0, 0, 1, 2)
+        lay.addWidget(self.total_label, 0, 2)
         rows = [(k, lbl, col) for k, (lbl, col) in theme.REASON_STYLE.items()]
         rows += [("supports", "Supports", theme.hex_to_q(theme.SUPPORT_COLOR)),
                  ("unsupported", "Unsupported", theme.hex_to_q(theme.UNSUPPORTED_COLOR))]
-        for r, (key, label, col) in enumerate(rows):
+        row = 1
+        for key, label, col in rows:
+            if key == "supports":           # a thin rule between contact reasons and results
+                sep = QtWidgets.QFrame()
+                sep.setFixedHeight(1)
+                sep.setStyleSheet(f"background: {theme.BORDER}; border: none;")
+                lay.addWidget(sep, row, 0, 1, 3)
+                row += 1
             dot = QtWidgets.QLabel()
             shape = "border-radius: 5px;" if key not in ("supports",) else "border-radius: 2px;"
             dot.setFixedSize(10, 10)
@@ -206,17 +227,82 @@ class Legend(QtWidgets.QFrame):
             name = QtWidgets.QLabel(label)
             cnt = QtWidgets.QLabel("0")
             cnt.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            cnt.setStyleSheet("color: white; font-weight: 600; border: none;")
-            lay.addWidget(dot, r, 0)
-            lay.addWidget(name, r, 1)
-            lay.addWidget(cnt, r, 2)
+            cnt.setStyleSheet(f"color: {theme.TEXT_STRONG}; font-weight: 600; border: none;")
+            lay.addWidget(dot, row, 0)
+            lay.addWidget(name, row, 1)
+            lay.addWidget(cnt, row, 2)
+            row += 1
             self.count_labels[key] = cnt
         self.adjustSize()
 
     def set_counts(self, counts: dict[str, int]) -> None:
         for k, lab in self.count_labels.items():
             lab.setText(str(counts.get(k, 0)) if k != "supports" else counts.get(k, "-"))
+        self.total_label.setText(str(sum(int(counts.get(k, 0)) for k in theme.REASON_STYLE)))
+        unsup = int(counts.get("unsupported", 0))
+        self.count_labels["unsupported"].setStyleSheet(
+            f"color: {theme.ERROR if unsup else theme.TEXT_STRONG}; font-weight: 600; border: none;")
         self.adjustSize()
+
+
+class BusyCard(QtWidgets.QFrame):
+    """Progress of the running computation over the 3D view: task, current step, progress,
+    elapsed time and a Cancel button (the window stays usable meanwhile)."""
+    cancelRequested = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget):
+        super().__init__(parent)
+        self.setObjectName("busyCard")
+        self.setStyleSheet(overlay_style(
+            f"QFrame#busyCard {{ border: 1px solid {theme.BANNER['busy'][2]}; }}"
+            f" QProgressBar {{ max-height: 6px; min-height: 6px; border: none;"
+            f" background: {theme.BG_INPUT}; border-radius: 3px; }}"
+            f" QProgressBar::chunk {{ background: {theme.ACCENT}; border-radius: 3px; }}"))
+        lay = QtWidgets.QGridLayout(self)
+        lay.setContentsMargins(theme.SP_L, theme.SP_M + 2, theme.SP_L, theme.SP_M + 2)
+        lay.setHorizontalSpacing(theme.SP_M)
+        lay.setVerticalSpacing(theme.SP_S + 2)
+        self.title = _overlay_title("")
+        self.title.setStyleSheet(self.title.styleSheet() + f" font-size: {theme.FS_BASE}pt;")
+        self.percent = QtWidgets.QLabel("")
+        self.percent.setStyleSheet(f"color: {theme.TEXT_STRONG}; font-weight: 600;")
+        self.percent.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.step = QtWidgets.QLabel("")
+        self.step.setStyleSheet(f"color: {theme.TEXT};")
+        self.elapsed = QtWidgets.QLabel("")
+        self.elapsed.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        self.elapsed.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(False)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.setIcon(icons.cancel())
+        self.cancel_button.setToolTip("Stop the computation (Esc)")
+        self.cancel_button.setStyleSheet(
+            f"QPushButton {{ background: {theme.BG_INPUT}; border: 1px solid {theme.BORDER};"
+            f" border-radius: {theme.R_M}px; padding: 3px {theme.SP_M + 2}px; }}"
+            f" QPushButton:hover {{ background: {theme.BG_HOVER}; border-color: {theme.ERROR}; }}")
+        self.cancel_button.clicked.connect(self.cancelRequested)
+        lay.addWidget(self.title, 0, 0)
+        lay.addWidget(self.percent, 0, 1)
+        lay.addWidget(self.cancel_button, 0, 2, 3, 1, QtCore.Qt.AlignVCenter)
+        lay.addWidget(self.bar, 1, 0, 1, 2)
+        lay.addWidget(self.step, 2, 0)
+        lay.addWidget(self.elapsed, 2, 1)
+        lay.setColumnStretch(0, 1)
+        self.setFixedWidth(360)
+        self.hide()
+
+    def set_state(self, title: str, fraction: float, step: str, elapsed_s: float) -> None:
+        self.title.setText(title)
+        f = min(max(float(fraction), 0.0), 1.0)
+        self.bar.setValue(int(f * 1000))
+        self.percent.setText(f"{f * 100:.0f} %")
+        fm = self.step.fontMetrics()
+        self.step.setText(fm.elidedText(step or "Starting", QtCore.Qt.ElideRight, 200))
+        self.step.setToolTip(step)
+        self.elapsed.setText(f"{elapsed_s:.0f} s" if elapsed_s < 60 else
+                             f"{int(elapsed_s // 60)} min {int(elapsed_s % 60):02d} s")
 
 
 class Viewport(gl.GLViewWidget):
@@ -299,6 +385,7 @@ class Viewport(gl.GLViewWidget):
         self.addItem(self.ghost_item)
 
         self.legend = Legend(self)
+        self.busy_card = BusyCard(self)
         self.overhang_legend = OverhangLegend(self)
         self.overhang_legend.hide()
         self._hover_timer = QtCore.QTimer(self, singleShot=True, interval=HOVER_INTERVAL_MS)
@@ -550,11 +637,13 @@ class Viewport(gl.GLViewWidget):
         self._place_legend()
 
     def _place_legend(self) -> None:
+        m = theme.SP_M + 2
         self.legend.adjustSize()
-        self.legend.move(10, self.height() - self.legend.height() - 10)
+        self.legend.move(m, self.height() - self.legend.height() - m)
         ol = self.overhang_legend
         ol.adjustSize()
-        ol.move(max(10, self.width() - ol.width() - 10), self.height() - ol.height() - 10)
+        ol.move(max(m, self.width() - ol.width() - m), self.height() - ol.height() - m)
+
 
     # ------------------------------------------------------------------ picking
     def mvp(self) -> np.ndarray:
@@ -734,46 +823,91 @@ class ViewportContainer(QtWidgets.QWidget):
         self.viewport = Viewport(self)
         bar = QtWidgets.QFrame(objectName="viewbar")
         bl = QtWidgets.QHBoxLayout(bar)
-        bl.setContentsMargins(6, 4, 6, 4)
-        bl.setSpacing(4)
-        bl.addWidget(QtWidgets.QLabel("Show", objectName="dim"))
+        bl.setContentsMargins(theme.SP_M, theme.SP_S, theme.SP_M, theme.SP_S)
+        bl.setSpacing(theme.SP_S)
+
+        def segment(items) -> tuple[QtWidgets.QFrame, list[QtWidgets.QPushButton]]:
+            """Buttons drawn as one segmented control."""
+            frame = QtWidgets.QFrame(objectName="segment")
+            sl = QtWidgets.QHBoxLayout(frame)
+            sl.setContentsMargins(0, 0, 0, 0)
+            sl.setSpacing(0)
+            out = []
+            for k, (label, tip, checkable) in enumerate(items):
+                b = QtWidgets.QPushButton(label, checkable=checkable)
+                b.setToolTip(tip)
+                b.setProperty("seg", "first" if k == 0 else
+                              ("last" if k == len(items) - 1 else "mid"))
+                sl.addWidget(b)
+                out.append(b)
+            return frame, out
+
+        # "Show" / "View" captions: hidden when the bar is narrow (1366 px screens), the
+        # segmented groups and their tooltips still say what they do
+        self.bar = bar
+        self.bar_captions = [QtWidgets.QLabel("Show", objectName="dim"),
+                             QtWidgets.QLabel("View", objectName="dim")]
+        for c in self.bar_captions:
+            c.setMinimumWidth(1)
+        bl.addWidget(self.bar_captions[0])
+        modes = (("both", "Model + supports", "Show the model and its supports"),
+                 ("model", "Model", "Show the model only"),
+                 ("supports", "Supports", "Show the supports only (raft included)"))
+        frame, buttons = segment([(lbl, tip, True) for _, lbl, tip in modes])
         self.mode_buttons: dict[str, QtWidgets.QPushButton] = {}
         group = QtWidgets.QButtonGroup(self)
-        for key, label in (("both", "Model + supports"), ("model", "Model"),
-                           ("supports", "Supports")):
-            b = QtWidgets.QPushButton(label, checkable=True)
+        for (key, _, _), b in zip(modes, buttons):
             b.clicked.connect(lambda _=False, k=key: self.viewport.set_view_mode(k))
             group.addButton(b)
-            bl.addWidget(b)
             self.mode_buttons[key] = b
         self.mode_buttons["both"].setChecked(True)
-        bl.addSpacing(16)
-        bl.addWidget(QtWidgets.QLabel("View", objectName="dim"))
-        for key, label in (("iso", "Iso"), ("front", "Front"), ("side", "Side"), ("top", "Top"),
-                           ("bottom", "Below")):
-            b = QtWidgets.QPushButton(label)
+        bl.addWidget(frame)
+        bl.addSpacing(theme.SP_L)
+        bl.addWidget(self.bar_captions[1])
+        views = (("iso", "Iso", "Isometric view"), ("front", "Front", "Front view"),
+                 ("side", "Side", "Side view"), ("top", "Top", "Top view"),
+                 ("bottom", "Below", "View from below: shows the overhangs"))
+        frame, buttons = segment([(lbl, tip, False) for _, lbl, tip in views])
+        for (key, _, _), b in zip(views, buttons):
             b.clicked.connect(lambda _=False, k=key: self.viewport.set_preset_view(k))
-            bl.addWidget(b)
+        bl.addWidget(frame)
         fit = QtWidgets.QPushButton("Fit")
+        fit.setIcon(icons.fit())
+        fit.setToolTip("Frame the whole scene (F)")
         fit.clicked.connect(self.viewport.fit_view)
         bl.addWidget(fit)
-        bl.addSpacing(16)
+        bl.addStretch(1)
         # overhang colours: automatic (on while no support is generated) until the user
         # clicks the button, then the user's choice is kept
         self.overhang_button = QtWidgets.QPushButton("Overhangs", checkable=True)
+        self.overhang_button.setIcon(icons.overhang())
         self.overhang_button.clicked.connect(self._on_overhang_clicked)
         bl.addWidget(self.overhang_button)
         self.overhang_choice: Optional[bool] = None    # None = automatic
         self._supports_present = False
-        bl.addStretch(1)
-        self.hint = QtWidgets.QLabel("Left click: add / select contact    Right click: delete    "
-                                     "Drag: orbit    Shift or middle drag: pan    Wheel: zoom",
-                                     self.viewport)
+        self.hint = QtWidgets.QLabel("Left click: add / select contact  \u00b7  Right click: delete"
+                                     "  \u00b7  Drag: orbit  \u00b7  Shift or middle drag: pan  "
+                                     "\u00b7  Wheel: zoom", self.viewport)
         self.hint.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.hint.setStyleSheet("background: rgba(22,24,29,170); color: #8a92a3; "
-                                "border-radius: 4px; padding: 3px 8px; font-size: 8.5pt;")
+        self.hint.setStyleSheet(f"background: {theme.OVERLAY_BG_SOFT}; color: {theme.TEXT_DIM}; "
+                                f"border-radius: {theme.R_M}px; padding: 3px {theme.SP_M}px; "
+                                f"font-size: {theme.FS_SMALL}pt;")
         self.hint.adjustSize()
-        self.hint.move(10, 10)
+        self.hint.move(theme.SP_M + 2, theme.SP_M + 2)
+        # empty state: what to do first
+        self.empty_label = QtWidgets.QLabel(self.viewport)
+        self.empty_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.empty_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.empty_label.setTextFormat(QtCore.Qt.RichText)
+        self.empty_label.setText(
+            f"<div style='color:{theme.TEXT_STRONG}; font-size:{theme.FS_TITLE + 2}pt;"
+            f" font-weight:600'>No model loaded</div>"
+            f"<div style='color:{theme.TEXT_DIM}; margin-top:6px'>Open a model (STL, OBJ, 3MF) or an"
+            f" ArborFDM project<br>File &gt; Open (Ctrl+O), or Import model in the left panel</div>")
+        self.empty_label.setStyleSheet(f"background: {theme.OVERLAY_BG}; border: 1px solid "
+                                       f"{theme.BORDER}; border-radius: {theme.R_L}px; "
+                                       f"padding: {theme.SP_XL}px {theme.SP_XL + 8}px;")
+        self.empty_label.hide()
         # state banner: computation running, supports out of date, mesh with errors
         self.banner = QtWidgets.QLabel("", self.viewport)
         self.banner.setObjectName("banner")
@@ -782,18 +916,20 @@ class ViewportContainer(QtWidgets.QWidget):
         self.banner.hide()
         self.banner_kind = ""
 
-        side = QtWidgets.QFrame(objectName="viewbar")
+        side = QtWidgets.QFrame(objectName="cutbar")
         sl = QtWidgets.QVBoxLayout(side)
-        sl.setContentsMargins(4, 6, 4, 6)
+        sl.setContentsMargins(theme.SP_S, theme.SP_M, theme.SP_S, theme.SP_M)
+        sl.setSpacing(theme.SP_S)
         self.clip_label = QtWidgets.QLabel("all", objectName="dim")
         self.clip_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.clip_label.setFixedWidth(46)
+        self.clip_label.setFixedWidth(50)
         self.clip_slider = QtWidgets.QSlider(QtCore.Qt.Vertical)
         self.clip_slider.setRange(0, 1000)
         self.clip_slider.setValue(1000)
         self.clip_slider.setToolTip("Cut by height: show only what is below this height")
         self.clip_slider.valueChanged.connect(self._on_clip)
         cut = QtWidgets.QLabel("Cut", objectName="dim")
+        cut.setToolTip(self.clip_slider.toolTip())
         cut.setAlignment(QtCore.Qt.AlignCenter)
         sl.addWidget(cut)
         sl.addWidget(self.clip_slider, 1, QtCore.Qt.AlignHCenter)
@@ -809,13 +945,54 @@ class ViewportContainer(QtWidgets.QWidget):
         lay.setSpacing(0)
         lay.addWidget(bar)
         lay.addLayout(mid, 1)
+        self.busy_card = self.viewport.busy_card
+        self.viewport.installEventFilter(self)       # overlays follow the view's size
         self._apply_overhang()
 
-    BANNER_STYLE = {
-        "busy": ("rgba(40,62,98,230)", "#cfe0ff", "#4f7fd0"),
-        "stale": ("rgba(92,66,16,235)", "#ffe2a8", "#d39b2a"),
-        "mesh": ("rgba(98,36,36,235)", "#ffd0d0", "#d05050"),
-    }
+    def eventFilter(self, obj, ev) -> bool:
+        if obj is self.viewport and ev.type() == QtCore.QEvent.Resize:
+            # isHidden, not isVisible: also right before the window is first shown
+            if not self.banner.isHidden():
+                self._place_banner()
+            if not self.empty_label.isHidden():
+                self._place_empty()
+            self._place_busy()
+        return False
+
+    def _place_busy(self) -> None:
+        """Progress card: centred under the state banner (top of the view, never over the
+        legends at the bottom)."""
+        bc, vp = self.busy_card, self.viewport
+        bc.adjustSize()
+        top = (self.banner.y() + self.banner.height()) if self.banner.isVisible() else \
+            (self.hint.y() + self.hint.height() if self.hint.isVisible() else 0)
+        bc.move(max(theme.SP_M, (vp.width() - bc.width()) // 2), top + theme.SP_M)
+
+    BANNER_STYLE = theme.BANNER
+
+    def set_empty(self, empty: bool) -> None:
+        """No model: a centred call to action replaces the editing hint and the legend."""
+        self.empty_label.setVisible(empty)
+        self.hint.setVisible(not empty)
+        self.viewport.legend.setVisible(not empty)
+        if empty:
+            self._place_empty()
+            self.empty_label.raise_()
+
+    def _place_empty(self) -> None:
+        e, vp = self.empty_label, self.viewport
+        e.adjustSize()
+        e.move(max(0, (vp.width() - e.width()) // 2), max(0, (vp.height() - e.height()) // 2))
+
+    def set_busy(self, title: str, fraction: float, step: str, elapsed_s: float) -> None:
+        """Show / update the progress card (title empty hides it)."""
+        if not title:
+            self.busy_card.hide()
+            return
+        self.busy_card.set_state(title, fraction, step, elapsed_s)
+        self._place_busy()
+        self.busy_card.show()
+        self.busy_card.raise_()
 
     def set_banner(self, text: str, kind: str = "") -> None:
         """Persistent message over the 3D view (empty text hides it)."""
@@ -826,23 +1003,36 @@ class ViewportContainer(QtWidgets.QWidget):
             return
         bg, fg, border = self.BANNER_STYLE.get(kind, self.BANNER_STYLE["stale"])
         self.banner.setStyleSheet(f"background: {bg}; color: {fg}; border: 1px solid {border};"
-                                  " border-radius: 5px; padding: 5px 9px; font-size: 9pt;")
+                                  f" border-left: 4px solid {border}; border-radius: {theme.R_M}px;"
+                                  f" padding: {theme.SP_S + 2}px {theme.SP_M + 2}px;"
+                                  f" font-size: {theme.FS_BASE}pt;")
         self.banner.setText(text)
         self._place_banner()
         self.banner.show()
         self.banner.raise_()
+        if self.busy_card.isVisible():
+            self._place_busy()
 
     def _place_banner(self) -> None:
         vp = self.viewport
         w = max(200, vp.width() - 20)
         self.banner.setFixedWidth(w)
         self.banner.adjustSize()
-        self.banner.move(10, self.hint.y() + self.hint.height() + 6)
+        top = (self.hint.y() + self.hint.height() + theme.SP_S + 2) if self.hint.isVisible() \
+            else theme.SP_M + 2
+        self.banner.move(theme.SP_M + 2, top)
 
     def resizeEvent(self, ev) -> None:
         super().resizeEvent(ev)
+        captions = sum(c.sizeHint().width() + theme.SP_S for c in self.bar_captions)
+        wide = self.bar.width() >= self.bar.sizeHint().width() - (
+            0 if self.bar_captions[0].isVisible() else -captions)
+        for c in self.bar_captions:
+            c.setVisible(wide)
         if self.banner.isVisible():
             self._place_banner()
+        if self.empty_label.isVisible():
+            self._place_empty()
 
     # -- overhang colours ------------------------------------------------------------
     def overhang_effective(self) -> bool:
@@ -883,9 +1073,9 @@ class ViewportContainer(QtWidgets.QWidget):
             self.viewport.set_clip(None)
         else:
             z = h * value / 1000.0
-            self.clip_label.setText(f"{z:.1f}")
+            self.clip_label.setText(f"{z:.1f} mm")
             # make an active cut obvious: the model looks sliced open otherwise
-            self.clip_label.setStyleSheet("color: #ffb347; font-weight: bold;")
+            self.clip_label.setStyleSheet(f"color: {theme.CUT_ACTIVE}; font-weight: bold;")
             self.clip_label.setToolTip(f"Cut active: everything above {z:.1f} mm is hidden "
                                        "(display only). Drag the slider to the top to show all.")
             self.viewport.set_clip(z)

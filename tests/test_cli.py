@@ -251,3 +251,101 @@ def test_module_generate_subprocess(tmp_path):
     r = _run("generate", _ex("shelf"), "-o", str(out), "-q", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
     assert validate_export(out) == []
+
+
+# ---------------------------------------------------------------------------
+# OrcaSlicer: --open-in-orca, orca --find / --set-path
+# ---------------------------------------------------------------------------
+def _fake_orca(path: Path, record: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                    f"open({str(record)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture
+def orca_env(tmp_path, monkeypatch):
+    """Isolated settings / to_slicer folders, no OrcaSlicer reachable by detection."""
+    import arbor.io.slicer_launch as sl
+    monkeypatch.setenv("ARBOR_USER_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("ARBOR_TO_SLICER_DIR", str(tmp_path / "to_slicer"))
+    monkeypatch.setattr(sl, "candidate_paths", lambda *a, **k: [tmp_path / "nowhere" / "orca-slicer"])
+    return tmp_path
+
+
+def _wait(p: Path) -> None:
+    import time
+    for _ in range(200):
+        if p.exists() and p.stat().st_size:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{p} not written")
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="fake executable is a POSIX script")
+def test_generate_open_in_orca_without_output(orca_env, capsys):
+    rec = orca_env / "args.json"
+    exe = _fake_orca(orca_env / "bin" / "orca-slicer", rec)
+    js = orca_env / "r.json"
+    src = Path(_ex("shelf"))
+    before = src.read_bytes()
+    rc = main(["generate", str(src), "--open-in-orca", "--orca-path", str(exe),
+               "--model-layer-height", "0.12", "--support-layer-height", "0.24", "--json", str(js)])
+    assert rc == EXIT_OK
+    _wait(rec)
+    files = list((orca_env / "to_slicer").glob("*.3mf"))
+    assert len(files) == 1 and files[0].name.startswith("shelf_")
+    assert json.loads(rec.read_text()) == [str(files[0].resolve())]
+    assert src.read_bytes() == before
+    rep = json.loads(js.read_text())
+    assert rep["orca"]["opened"] is True and rep["orca"]["file"] == str(files[0])
+    assert validate_export(files[0]) == []
+    with zipfile.ZipFile(files[0]) as z:
+        cfg = z.read("Metadata/model_settings.config").decode()
+    assert cfg.count('key="enable_support" value="0"') == 2 and 'value="0.24"' in cfg
+    assert "Opening in OrcaSlicer" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="fake executable is a POSIX script")
+def test_generate_open_in_orca_uses_saved_path_and_output(orca_env):
+    rec = orca_env / "args.json"
+    exe = _fake_orca(orca_env / "saved" / "orca", rec)
+    assert main(["orca", "--set-path", str(exe)]) == EXIT_OK
+    out = orca_env / "out.3mf"
+    assert main(["-q", "generate", _ex("shelf"), "-o", str(out), "--open-in-orca"]) == EXIT_OK
+    _wait(rec)
+    sent = Path(json.loads(rec.read_text())[0])
+    assert out.exists() and sent.parent == (orca_env / "to_slicer").resolve() and sent != out
+
+
+def test_generate_open_in_orca_not_found_still_exports(orca_env, capsys):
+    rc = main(["generate", _ex("shelf"), "--open-in-orca"])
+    assert rc == EXIT_PROBLEMS
+    err = capsys.readouterr().err
+    assert "OrcaSlicer not found" in err
+    assert len(list((orca_env / "to_slicer").glob("*.3mf"))) == 1
+
+
+def test_open_in_orca_usage_errors(orca_env):
+    assert main(["generate", _ex("shelf")]) == EXIT_USAGE                       # no -o
+    assert main(["generate", _ex("shelf"), "-o", str(orca_env / "x.3mf"),
+                 "--orca-path", "/x"]) == EXIT_USAGE                              # needs --open-in-orca
+    assert main(["generate", _ex("shelf"), "--open-in-orca",
+                 "--orca-path", str(orca_env / "missing")]) == EXIT_USAGE
+    assert not (orca_env / "to_slicer").exists()                                 # failed before work
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="fake executable is a POSIX script")
+def test_orca_find_set_clear(orca_env, capsys):
+    assert main(["orca", "--find"]) == EXIT_PROBLEMS
+    out = capsys.readouterr().out
+    assert "not found" in out and str(orca_env / "nowhere" / "orca-slicer") in out
+    exe = _fake_orca(orca_env / "o" / "orca-slicer", orca_env / "unused.json")
+    assert main(["orca", "--set-path", str(orca_env / "missing")]) == EXIT_USAGE
+    assert main(["orca", "--set-path", str(exe)]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["orca", "--find"]) == EXIT_OK
+    assert f"OrcaSlicer: {exe}" in capsys.readouterr().out
+    assert main(["orca", "--clear-path"]) == EXIT_OK
+    assert main(["orca", "--find"]) == EXIT_PROBLEMS

@@ -1,0 +1,101 @@
+name: release
+
+# Push a tag such as v0.2.0 (it must match the version in arbor/__init__.py).
+# The workflow builds the Windows onedir package with PyInstaller, zips it with
+# LICENSE.txt and THIRD_PARTY_NOTICES.txt, computes SHA-256 checksums and creates a
+# DRAFT GitHub release: review it and click "Publish release" yourself.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (versions pinned by packaging/requirements-build.txt)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --upgrade pip
+          python -m pip install -c packaging/requirements-build.txt ".[gui,dev]"
+          python -m pip list
+
+      - name: Check tag and package version
+        id: ver
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ver = python -c "import importlib.metadata as m; print(m.version('arborfdm'))"
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$ver") {
+            Write-Error "tag ${{ github.ref_name }} does not match package version $ver"
+            exit 1
+          }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Tests (CLI and export)
+        run: python -m pytest -q -p no:cacheprovider tests/test_cli.py tests/test_export.py tests/test_export_extra.py
+
+      - name: PyInstaller
+        run: python -m PyInstaller --noconfirm --clean packaging/arborfdm.spec
+
+      - name: Smoke test of the frozen CLI
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          dist/ArborFDM/arborfdm-cli.exe --version
+          dist/ArborFDM/arborfdm-cli.exe generate examples/shelf.stl -o build/smoke_shelf.3mf -q
+          foreach ($f in "LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "ArborFDM.exe") {
+            if (-not (Test-Path "dist/ArborFDM/$f")) { Write-Error "missing $f"; exit 1 }
+          }
+
+      - name: Zip and SHA-256
+        id: pkg
+        run: |
+          $zip = "ArborFDM-${{ steps.ver.outputs.version }}-windows-x64.zip"
+          Compress-Archive -Path dist/ArborFDM -DestinationPath "dist/$zip"
+          Copy-Item dist/ArborFDM/THIRD_PARTY_NOTICES.txt dist/THIRD_PARTY_NOTICES.txt
+          Push-Location dist
+          Get-FileHash -Algorithm SHA256 $zip, THIRD_PARTY_NOTICES.txt |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
+            Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArborFDM-${{ steps.ver.outputs.version }}-windows-x64
+          path: |
+            dist/${{ steps.pkg.outputs.zip }}
+            dist/SHA256SUMS.txt
+            dist/THIRD_PARTY_NOTICES.txt
+          retention-days: 30
+
+      - name: Draft GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $notes = "Windows build of ArborFDM ${{ github.ref_name }}. See CHANGELOG.md. " +
+                   "Check the SHA-256 in SHA256SUMS.txt before running. " +
+                   "The executable is not code-signed: see docs/PACKAGING.md (SmartScreen, antivirus)."
+          gh release create "${{ github.ref_name }}" --draft --verify-tag `
+            --title "ArborFDM ${{ github.ref_name }}" --notes "$notes" `
+            "dist/${{ steps.pkg.outputs.zip }}" dist/SHA256SUMS.txt dist/THIRD_PARTY_NOTICES.txt

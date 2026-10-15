@@ -1,0 +1,78 @@
+name: Bug report
+description: Something does not work (crash, wrong supports, export or slicer problem)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. English or French is fine.
+        **Do not attach models you are not allowed to share** (paid or licensed miniatures, Patreon files...).
+        A screenshot, the JSON report (`--json report.json`) or a simple model that shows the problem is enough.
+  - type: input
+    id: version
+    attributes:
+      label: ArborFDM version
+      description: "`arborfdm-cli --version` (in the release folder) or the zip name"
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run ArborFDM?
+      options:
+        - Windows release zip
+        - From source (pip install -e)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and GPU
+      placeholder: "Windows 11 23H2, NVIDIA RTX 3060 / Ubuntu 24.04, Intel UHD"
+    validations:
+      required: true
+  - type: input
+    id: slicer
+    attributes:
+      label: Slicer and version (if relevant)
+      placeholder: "OrcaSlicer 2.4.2 / Bambu Studio 2.x / PrusaSlicer 2.x / Cura 5.x"
+  - type: input
+    id: printer
+    attributes:
+      label: Printer, nozzle and layer height
+      placeholder: "Bambu A1 mini, 0.2 mm nozzle, 0.08 mm layers"
+  - type: input
+    id: profile
+    attributes:
+      label: ArborFDM profile and changed parameters
+      placeholder: "nozzle_02_normal, tip_diameter=0.3"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open model ...
+        2. Generate with ...
+        3. ...
+  - type: textarea
+    id: files
+    attributes:
+      label: Files, screenshots, logs
+      description: |
+        Drag files here. A `.arbor` project or exported 3MF helps a lot, **only if you have the right to share the model**.
+        Error text from the CLI or the "Issues" panel is welcome.
+  - type: checkboxes
+    id: rights
+    attributes:
+      label: Model rights
+      options:
+        - label: Any model I attached is mine, free to share, or I did not attach a model.
+          required: true

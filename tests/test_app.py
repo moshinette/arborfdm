@@ -115,10 +115,11 @@ def test_every_toolbar_action_has_a_real_slot(window):
             assert a.receivers("2triggered(bool)") >= 1 or a.receivers("2triggered()") >= 1, a.text()
     for expected in ("New", "Open", "Save", "Undo", "Redo", "Generate supports"):
         assert expected in texts
-    # the export button carries a menu of four connected actions (3MF, 3MF separate, 2 STL)
+    # the export button carries a menu of four connected export actions (3MF, 3MF separate,
+    # 2 STL) followed by "Open in OrcaSlicer" (added to the Export menu on purpose)
     menu = window.export_button.menu()
     exports = [a for a in menu.actions() if not a.isSeparator()]
-    assert len(exports) == 4
+    assert len(exports) == 5 and exports[-1] is window.act_open_orca
     for a in exports:
         assert a.receivers("2triggered(bool)") >= 1 or a.receivers("2triggered()") >= 1
 
@@ -731,3 +732,54 @@ def test_export_3mf_separate_objects(app, window, tmp_path):
     with zipfile.ZipFile(out) as z:
         xml = z.read("3D/3dmodel.model").decode()
     assert xml.count("<item ") == 2
+
+
+def test_open_in_orca_and_preferences_entries(app, window, stl_path):
+    """Places reserved for the OrcaSlicer launch: Export menu + toolbar button (enabled only
+    with supports) and File > Preferences... opening a dialog with a "Slicers" section."""
+    a = window.act_open_orca
+    assert a.text() == "Open in OrcaSlicer"
+    assert a in window.export_menu.actions() and a in window.toolbar.actions()
+    tb = window.toolbar.actions()
+    assert tb.index(a) == tb.index(next(x for x in tb
+                                        if window.toolbar.widgetForAction(x)
+                                        is window.export_button)) + 1
+    assert not a.isEnabled()
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    assert not a.isEnabled()                       # model but no supports
+    assert window.generate_full()
+    assert not a.isEnabled()                       # locked while computing
+    wait_for(app, window, timeout=300)
+    assert a.isEnabled()
+    a.trigger()
+    assert "not available yet" in window.status_msg.text()
+    file_menu = window.menuBar().actions()[0].menu()
+    assert window.act_preferences in file_menu.actions()
+    window.act_preferences.trigger()
+    from arbor.app.preferences import PreferencesDialog
+    dlg = window.preferences_dialog()
+    assert isinstance(dlg, PreferencesDialog) and dlg.slicers_group.title() == "Slicers"
+    assert dlg.sections["Slicers"] is dlg.slicers_form
+
+
+def test_busy_card_and_empty_state(app, window, monkeypatch, stl_path):
+    """Feedback during long computations: progress card with step and Cancel over the view;
+    a call to action when no model is loaded."""
+    assert window.view.empty_label.isVisibleTo(window)
+    assert not window.view.viewport.legend.isVisibleTo(window)
+    _slow_generation(monkeypatch)
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    assert not window.view.empty_label.isVisibleTo(window)
+    assert window.view.viewport.legend.isVisibleTo(window)
+    assert window.generate_full()
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 0.2:
+        app.processEvents()
+    card = window.view.busy_card
+    assert card.isVisibleTo(window) and card.title.text() == "Generating supports"
+    assert card.percent.text().endswith("%")
+    card.cancel_button.click()
+    wait_for(app, window, timeout=30)
+    assert window.status_msg.text() == "Cancelled" and not card.isVisibleTo(window)

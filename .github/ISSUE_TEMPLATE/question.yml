@@ -1,0 +1,15 @@
+name: Question
+description: How do I...? Which profile for...? (use Discussions if enabled)
+labels: [question]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: ArborFDM version, printer, nozzle, slicer
+      placeholder: "0.2.0, Bambu A1 mini 0.2 mm, OrcaSlicer 2.4"
