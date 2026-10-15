@@ -137,14 +137,14 @@ def test_sphere_real_overhang_consistent_across_tessellation(seg):
         assert c.note and c.reason in (ContactReason.SURFACE, ContactReason.EDGE)
 
 
-def test_sphere_on_plate_default_is_below_overhang_angle():
-    """Root cause of the empty result on S.sphere_on_plate(): the sphere (r = 10)
+def test_sphere_sunk_2mm_is_below_overhang_angle():
+    """A sphere sunk 2 mm (the former fixture default) needs no support: the sphere (r = 10)
     leaves the plate at 8 mm below its centre, i.e. at asin(0.8) = 53.1 deg from
     vertical, under the 55 deg threshold. Only facetting overshoot of the 96
     segment mesh (thin ring < one layer tall, < 0.2 mm2 in 20 separate faces)
     crosses 55 deg; the slicing step at the junction is 0.152 mm < 0.171 mm."""
     p = P()
-    m = S.sphere_on_plate()
+    m = S.sphere_on_plate(sink=2.0)
     r, cz, plate = m.metadata["radius"], m.metadata["center_z"], m.metadata["plate"]
     tilt = math.degrees(math.asin((cz - plate) / r))
     assert tilt < p.overhang_angle_deg

@@ -6,6 +6,7 @@ failed, as Issue objects (severity error / warning / info, machine readable code
 
 Checks (code -> meaning):
   unrouted_contact     a contact could not be connected to the plate or the model (error)
+  sub_layer_gap        contact less than one layer above a surface, nothing to build (warning)
   unsupported_region   an island / overhang region from the layer analysis has no routed
                        contact close enough below it (error for islands and large areas,
                        warning for small overhang slivers)
@@ -71,6 +72,13 @@ def _check_unrouted(contacts, tree, issues):
         if c.id in routed and c.id not in failed:
             continue
         why = failed.get(c.id, "no support was built for this contact")
+        if "less than one layer" in why:
+            # the slicer prints this sliver directly from the surface below
+            issues.append(Issue("warning", "sub_layer_gap",
+                                f"Contact {c.id} is less than one layer above another surface; "
+                                f"no support built ({why})",
+                                np.asarray(c.position, float).copy(), c.id))
+            continue
         issues.append(Issue("error", "unrouted_contact",
                             f"Contact {c.id} ({c.reason.value}) is not supported: {why}",
                             np.asarray(c.position, float).copy(), c.id))

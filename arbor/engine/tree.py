@@ -453,6 +453,11 @@ class _Router:
             if pos[2] - zb < 0.05:
                 tree.failed[c.id] = "contact lies on the build plate"
                 continue
+            floor = self._floor_below(pos)
+            if floor is not None and pos[2] - floor[0] < P.tip_length + self.r_min + self.hard:
+                # too little room under the contact for tip + branch: short support
+                self._short_support(c, pos, n, tip_r, floor[0], floor[1])
+                continue
             if self.grid.inside(base):
                 tree.failed[c.id] = "tip base would be inside the model (surface faces up?)"
                 continue
@@ -475,6 +480,113 @@ class _Router:
             move = (base[2] - (zb + kb * dz)) * self.tan
             self.pending.append((kb, b.id, move, max(self.r_min, self.r_tipbase)))
         self.pending.sort(key=lambda t: -t[0])
+
+    # -- short supports (contact just above a surface) ----------------------------
+    def min_short_gap(self) -> float:
+        """Smallest free height under a contact for which a support is built.
+
+        layer_height + z_gap: below one layer (after the requested air gap) the slicer has
+        no layer left between the surface below and the overhang, so the "support" would
+        be fused into both surfaces (pure penetration, no support material of its own).
+        From one layer up, the slicer prints at least one layer of support under the
+        contact, which is the minimum that can carry it."""
+        return self.P.layer_height + max(self.P.z_gap, 0.0)
+
+    def _floor_below(self, pos: np.ndarray):
+        """(z, on_plate) of the first surface hit by a vertical ray going down from the
+        contact, if that surface is closer than tip_length + a margin; None otherwise.
+
+        The grid answers whether a surface may be close (cheap, conservative); the
+        height itself is computed exactly on the triangles (the grid is too coarse for
+        sub-millimetre gaps)."""
+        P, zb = self.P, self.zb
+        reach = P.tip_length + self.r_min + self.hard
+        near_plate = pos[2] - zb < reach
+        g = self.grid
+        i, j, ok = g.cell_index(pos[:2])
+        maybe = False
+        if ok[0]:
+            for dj in (-1, 0, 1):
+                for di in (-1, 0, 1):
+                    ii, jj = int(i[0]) + di, int(j[0]) + dj
+                    if not (0 <= ii < g.nx and 0 <= jj < g.ny):
+                        continue
+                    lo, hi = g._intervals(jj * g.nx + ii)
+                    if np.any((hi < pos[2] + g.res) & (hi > pos[2] - reach - g.res)):
+                        maybe = True
+                        break
+                if maybe:
+                    break
+        if not (maybe or near_plate):
+            return None
+        z_hit = self._ray_down(pos)
+        if z_hit is not None and z_hit > zb:
+            fl, on_plate = z_hit, False
+        else:
+            fl, on_plate = zb, True
+        if pos[2] - fl >= reach:
+            return None
+        return fl, on_plate
+
+    def _ray_down(self, pos: np.ndarray) -> Optional[float]:
+        """Highest model surface strictly below pos on the vertical through pos (exact)."""
+        if not hasattr(self, "_tri"):
+            V = np.asarray(self.mesh.vertices, float)
+            F = np.asarray(self.mesh.faces, np.int64)
+            T = V[F] if len(F) else np.zeros((0, 3, 3))
+            self._tri = T
+            self._tri_lo = T.min(axis=1) if len(T) else np.zeros((0, 3))
+            self._tri_hi = T.max(axis=1) if len(T) else np.zeros((0, 3))
+        T, lo, hi = self._tri, self._tri_lo, self._tri_hi
+        if not len(T):
+            return None
+        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2]) - 1e-4
+        m = (lo[:, 0] <= px) & (hi[:, 0] >= px) & (lo[:, 1] <= py) & (hi[:, 1] >= py) & (lo[:, 2] < pz)
+        t = T[m]
+        if not len(t):
+            return None
+        x, y, z = t[:, :, 0], t[:, :, 1], t[:, :, 2]
+        a2 = (x[:, 1] - x[:, 0]) * (y[:, 2] - y[:, 0]) - (x[:, 2] - x[:, 0]) * (y[:, 1] - y[:, 0])
+        k = np.abs(a2) > 1e-14
+        x, y, z, a2 = x[k], y[k], z[k], a2[k]
+        w0 = ((x[:, 1] - px) * (y[:, 2] - py) - (x[:, 2] - px) * (y[:, 1] - py)) / a2
+        w1 = ((x[:, 2] - px) * (y[:, 0] - py) - (x[:, 0] - px) * (y[:, 2] - py)) / a2
+        w2 = 1.0 - w0 - w1
+        e = -1e-9
+        ins = (w0 >= e) & (w1 >= e) & (w2 >= e)
+        zz = (w0 * z[:, 0] + w1 * z[:, 1] + w2 * z[:, 2])[ins]
+        zz = zz[zz < pz]
+        return float(zz.max()) if len(zz) else None
+
+    def _short_support(self, c, pos, n, tip_r: float, floor_z: float, on_plate: bool) -> None:
+        """Contact less than tip_length (+ branch room) above a surface: one vertical cone,
+        tip_diameter at the contact widening towards tip_base_diameter (in proportion to
+        the available height), standing on the plate (FOOT) or on the model (MODEL_FOOT,
+        only when allow_on_model). Below min_short_gap() nothing is built and the reason
+        goes to tree.failed."""
+        P, tree = self.P, self.tree
+        gap = pos[2] - P.z_gap - floor_z
+        where = "build plate" if on_plate else "model"
+        if gap < self.min_short_gap() - 1e-9:
+            tree.failed[c.id] = (f"only {pos[2] - floor_z:.2f} mm free under the contact (surface of the "
+                                 f"{where} below): less than one layer (+ z_gap) = "
+                                 f"{self.min_short_gap():.2f} mm, no support can be printed there")
+            return
+        if not on_plate and not P.allow_on_model:
+            tree.failed[c.id] = (f"only {pos[2] - floor_z:.2f} mm above the model: a short support "
+                                 f"would stand on the model and supports on the model are disabled")
+            return
+        tip_pos = pos - n * P.tip_penetration - np.array([0.0, 0.0, P.z_gap])
+        tip = tree.add(tip_pos, tip_r, NodeKind.TIP, contact_id=c.id)
+        frac = min(1.0, max(gap, 0.0) / max(P.tip_length, 1e-6))
+        r_low = tip_r + (self.r_tipbase - tip_r) * frac
+        if on_plate:
+            f = tree.add([tip_pos[0], tip_pos[1], self.zb], max(r_low, tip_r), NodeKind.FOOT)
+            tree.foot_radius[f.id] = self._foot_r(f.position, f.radius)
+        else:
+            f = tree.add([tip_pos[0], tip_pos[1], floor_z - P.tip_penetration],
+                         min(r_low, max(P.on_model_tip_diameter / 2, tip_r)), NodeKind.MODEL_FOOT)
+        tip.parent = f.id
 
     def _base_clearance(self, pos: np.ndarray, u: np.ndarray) -> float:
         """Horizontal clearance from the model of a tip base pos + u * tip_length

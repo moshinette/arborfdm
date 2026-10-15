@@ -118,3 +118,70 @@ def test_blocked_node_fails_instead_of_cutting_through():
     r._blocked(n2.id, np.array([0.0, 0.0]), 7.5, 0.5)
     feet = [m for m in r.tree.nodes.values() if m.kind == NodeKind.MODEL_FOOT]
     assert len(feet) == 2 and min(f.position[2] for f in feet) < 3.5
+
+
+# ---------------------------------------------------------------------------
+# short supports: contact less than a tip length above a surface
+# ---------------------------------------------------------------------------
+def _budget(n_contacts, p):
+    r = p.tip_base_diameter / 2
+    return n_contacts * np.pi * r * r * (p.tip_penetration + 0.15) + 0.5
+
+
+def test_sphere_on_plate_short_supports_stand_on_model_plate():
+    p = prm()
+    m = S.sphere_on_plate()
+    res = pipeline.generate(m.copy(), p)
+    act = [c for c in res.contacts if c.enabled]
+    assert act and not res.tree.failed, res.tree.failed
+    feet = [n for n in res.tree.nodes.values() if n.kind == NodeKind.MODEL_FOOT]
+    assert len(feet) == len(act)
+    for f in feet:   # on the model plate top (z = 2), sunk by tip_penetration
+        assert f.position[2] == pytest.approx(2.0 - p.tip_penetration, abs=1e-3)
+    assert all(c.rests_on_model for c in act)
+    assert res.support_mesh.is_watertight
+    assert overlap(res.support_mesh, build.trimesh_to_manifold(m)) <= _budget(len(act), p)
+
+
+def test_short_support_to_build_plate_has_low_foot_and_no_collar():
+    p = prm()
+    m = S.floating_cube(10.0, 1.0)        # underside 1 mm above the plate
+    res = pipeline.generate(m.copy(), p)
+    act = [c for c in res.contacts if c.enabled]
+    assert act and not res.tree.failed, res.tree.failed
+    st = res.tree.stats()
+    assert st["model_feet"] == 0 and st["feet"] == len(act)
+    sm = res.support_mesh
+    assert sm.is_watertight and sm.bounds[0, 2] >= -1e-6
+    assert overlap(sm, build.trimesh_to_manifold(m)) <= _budget(len(act), p)
+
+
+def test_contact_below_one_layer_is_reported_not_built():
+    p = prm()
+    m = S.floating_cube(10.0, 0.1)        # 0.1 mm < layer_height (0.12): nothing printable
+    cs = [Contact(i, np.array([x, 0.0, 0.1]), np.array([0.0, 0.0, -1.0]), ContactReason.MANUAL,
+                  manual=True) for i, x in enumerate((-2.0, 2.0))]
+    res = pipeline.generate(m.copy(), p, contacts=cs)
+    tips = {n.contact_id for n in res.tree.nodes.values() if n.kind == NodeKind.TIP}
+    for c in cs:
+        assert c.id not in tips
+        assert "less than one layer" in res.tree.failed[c.id]
+
+
+def test_short_support_on_model_respects_allow_on_model():
+    p = prm().updated(allow_on_model=False)
+    res = pipeline.generate(S.sphere_on_plate(), p)
+    act = [c for c in res.contacts if c.enabled]
+    assert act
+    for c in act:
+        assert "supports on the model are disabled" in res.tree.failed[c.id]
+    assert res.tree.stats()["model_feet"] == 0
+
+
+def test_ray_down_is_exact():
+    m = S.sphere_on_plate()
+    r = _router(m, (0.0, 0.0, 16.0))
+    assert r._ray_down(np.array([4.75, 0.0, 2.15])) == pytest.approx(2.0, abs=1e-6)
+    assert r._ray_down(np.array([20.0, 0.0, 5.0])) is None
+    fl = r._floor_below(np.array([4.75, 0.0, 2.15]))
+    assert fl is not None and fl[0] == pytest.approx(2.0, abs=1e-6) and not fl[1]

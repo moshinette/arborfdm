@@ -243,8 +243,16 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
             fr = max(float(foot_radius.get(n.id, P.foot_diameter / 2)), n.radius)
             base = np.array([n.position[0], n.position[1], z_base])
             fsegs = max(segs, 24)
-            out.append(cone_between(base, base + [0, 0, P.foot_height], fr, fr, fsegs))
             r_top = max([nodes[c].radius for c in k], default=n.radius)
+            if any(nodes[c].kind == NodeKind.TIP for c in k):
+                # short support (contact just above the plate): the foot disk may not
+                # rise into the overhang above it, and a collar would swallow the tip
+                room = min(nodes[c].position[2] for c in k) - z_base
+                fh = min(P.foot_height, 0.5 * room)
+                if fh > 1e-3:
+                    out.append(cone_between(base, base + [0, 0, fh], fr, fr, fsegs))
+                continue
+            out.append(cone_between(base, base + [0, 0, P.foot_height], fr, fr, fsegs))
             collar_r = min(max(P.collar_diameter / 2, r_top), fr)
             top = base + [0, 0, P.foot_height + P.collar_height]
             out.append(cone_between(base + [0, 0, 0.5 * P.foot_height], top, collar_r, r_top, fsegs))
