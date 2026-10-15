@@ -1,0 +1,12 @@
+{
+  "inherits": "_nozzle_02",
+  "label": "0.2 mm, Normal",
+  "description": "Balanced coverage and mark size. Starting values, not validated on a specific printer or material.",
+  "values": {
+    "contact_spacing": 2.4,
+    "edge_spacing": 1.6,
+    "contact_density": 1.0,
+    "min_contact_distance": 0.6,
+    "tip_diameter": 0.26
+  }
+}

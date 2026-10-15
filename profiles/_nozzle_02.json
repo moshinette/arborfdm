@@ -1,0 +1,22 @@
+{
+  "abstract": true,
+  "label": "0.2 mm base",
+  "values": {
+    "nozzle_diameter": 0.2,
+    "line_width": 0.22,
+    "layer_height": 0.08,
+    "tip_diameter": 0.26,
+    "tip_base_diameter": 0.7,
+    "tip_length": 1.2,
+    "tip_penetration": 0.03,
+    "branch_min_diameter": 0.7,
+    "branch_max_diameter": 1.8,
+    "trunk_diameter": 2.0,
+    "brace_diameter": 0.5,
+    "xy_clearance": 0.6,
+    "on_model_tip_diameter": 0.24,
+    "min_region_area": 0.06,
+    "foot_diameter": 5.0,
+    "collar_diameter": 3.2
+  }
+}

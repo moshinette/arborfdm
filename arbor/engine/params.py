@@ -1,0 +1,172 @@
+"""Support generation parameters and printing profiles.
+
+All lengths are millimetres, all angles are degrees.
+Convention for angles: measured from the vertical (Z) axis.
+  overhang_angle_deg: a face whose downward tilt from vertical exceeds this value needs
+  support (0 = vertical wall, 90 = flat ceiling). Typical FDM default: 50-60.
+  branch_angle_deg: maximum tilt of a support segment from vertical.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+from typing import Any
+
+PROFILE_DIR = Path(__file__).resolve().parent.parent.parent / "profiles"
+
+
+@dataclass
+class SupportParams:
+    # --- printer / process -------------------------------------------------
+    nozzle_diameter: float = 0.4
+    line_width: float = 0.42
+    layer_height: float = 0.12
+
+    # --- detection ----------------------------------------------------------
+    overhang_angle_deg: float = 55.0
+    # Unsupported areas smaller than this (mm^2) are ignored (noise / bridging-safe)
+    min_region_area: float = 0.15
+    # Maximum horizontal distance a layer can extend beyond the layer below
+    # before it is considered unsupported (mm). <= 0 means derived from angle.
+    max_unsupported_overhang: float = 0.0
+
+    # --- contacts -----------------------------------------------------------
+    contact_spacing: float = 3.0          # max spacing of contacts across flat overhang areas
+    edge_spacing: float = 2.0             # spacing of contacts along hanging edges
+    min_contact_distance: float = 0.8     # contacts closer than this are merged
+    contact_density: float = 1.0          # multiplier (>1 = more contacts)
+    manual_only: bool = False             # only user-placed contacts are used
+
+    # --- tips ---------------------------------------------------------------
+    tip_diameter: float = 0.45            # diameter where the tip touches the model
+    tip_length: float = 1.6               # length of the conical tip
+    tip_base_diameter: float = 1.0        # diameter where the tip meets its branch
+    tip_penetration: float = 0.05         # controlled penetration into the model
+    tip_shape: str = "cone"               # "cone" | "ball"
+    z_gap: float = 0.0                    # extra vertical clearance (subtracted from tip)
+    xy_clearance: float = 0.8             # min horizontal clearance of branches from the model
+
+    # --- branches / trunks --------------------------------------------------
+    branch_min_diameter: float = 1.0
+    branch_max_diameter: float = 2.4
+    branch_angle_deg: float = 40.0
+    segment_length: float = 1.0
+    merge_distance: float = 6.0           # max horizontal distance for two branches to merge
+    junction_radius_factor: float = 1.15  # junction sphere radius / branch radius
+    trunk_diameter: float = 2.6
+    trunk_growth_per_mm: float = 0.02     # diameter growth per mm descended
+    min_tree_distance: float = 1.5
+    walls: int = 3                        # informational: perimeters advised in slicer
+
+    # --- feet ---------------------------------------------------------------
+    foot_diameter: float = 6.0
+    foot_height: float = 0.6
+    collar_diameter: float = 4.0
+    collar_height: float = 1.2
+
+    # --- braces -------------------------------------------------------------
+    braces_enabled: bool = True
+    brace_diameter: float = 0.8
+    brace_min_height: float = 12.0        # only trunks taller than this get braces
+    brace_spacing_z: float = 8.0
+    brace_max_length: float = 12.0
+
+    # --- raft ---------------------------------------------------------------
+    raft_enabled: bool = False
+    raft_thickness: float = 0.8
+    raft_margin: float = 2.0
+
+    # --- supports standing on the model -------------------------------------
+    allow_on_model: bool = True
+    on_model_tip_diameter: float = 0.4
+
+    # --- meshing ------------------------------------------------------------
+    circle_segments: int = 12
+
+    # ------------------------------------------------------------------------
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SupportParams":
+        known = {f.name for f in fields(cls)}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"Unknown parameter(s): {sorted(unknown)}")
+        return cls(**data)
+
+    def updated(self, **kw: Any) -> "SupportParams":
+        d = self.to_dict()
+        d.update(kw)
+        return SupportParams.from_dict(d)
+
+    def validate(self) -> list[str]:
+        """Return a list of human readable problems (empty = valid)."""
+        p = []
+        if not 0.1 <= self.nozzle_diameter <= 1.2:
+            p.append("nozzle_diameter out of range [0.1, 1.2]")
+        if not 0.02 <= self.layer_height <= 0.8 * self.nozzle_diameter:
+            p.append("layer_height must be in [0.02, 0.8 x nozzle]")
+        if not 10 <= self.overhang_angle_deg <= 89:
+            p.append("overhang_angle_deg out of range [10, 89]")
+        if self.tip_diameter < 0.5 * self.nozzle_diameter:
+            p.append("tip_diameter below half the nozzle diameter is not printable")
+        if self.tip_base_diameter < self.tip_diameter:
+            p.append("tip_base_diameter must be >= tip_diameter")
+        if self.branch_min_diameter > self.branch_max_diameter:
+            p.append("branch_min_diameter must be <= branch_max_diameter")
+        if not 0 <= self.branch_angle_deg <= 60:
+            p.append("branch_angle_deg out of range [0, 60]")
+        if self.min_contact_distance <= 0 or self.contact_spacing <= 0 or self.edge_spacing <= 0:
+            p.append("contact spacings must be positive")
+        if self.contact_density <= 0:
+            p.append("contact_density must be positive")
+        if self.circle_segments < 6:
+            p.append("circle_segments must be >= 6")
+        if self.tip_shape not in ("cone", "ball"):
+            p.append("tip_shape must be 'cone' or 'ball'")
+        return p
+
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+@dataclass
+class Profile:
+    key: str
+    label: str
+    description: str
+    params: SupportParams = field(default_factory=SupportParams)
+
+
+def load_profiles(directory: Path | None = None) -> dict[str, Profile]:
+    """Load every *.json profile. A profile may 'inherit' another and override values."""
+    directory = directory or PROFILE_DIR
+    raw: dict[str, dict] = {}
+    for f in sorted(directory.glob("*.json")):
+        raw[f.stem] = json.loads(f.read_text(encoding="utf-8"))
+
+    resolved: dict[str, dict] = {}
+
+    def resolve(key: str, stack: tuple = ()) -> dict:
+        if key in resolved:
+            return resolved[key]
+        if key in stack:
+            raise ValueError(f"Profile inheritance cycle: {stack + (key,)}")
+        if key not in raw:
+            raise KeyError(f"Unknown profile {key!r}")
+        d = raw[key]
+        base = resolve(d["inherits"], stack + (key,))["values"] if d.get("inherits") else {}
+        values = {**base, **d.get("values", {})}
+        resolved[key] = {**d, "values": values}
+        return resolved[key]
+
+    out = {}
+    for key in raw:
+        d = resolve(key)
+        if d.get("abstract"):
+            continue
+        out[key] = Profile(key, d.get("label", key), d.get("description", ""),
+                           SupportParams.from_dict(d["values"]))
+    return out

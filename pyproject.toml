@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arborfdm"
+version = "0.1.0"
+description = "Hybrid tree support generator for FDM miniatures"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "trimesh>=4.0",
+  "manifold3d>=3.0",
+  "shapely>=2.0",
+  "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6", "pyqtgraph>=0.13", "PyOpenGL>=3.1"]
+dev = ["pytest>=8", "pyinstaller>=6"]
+
+[project.scripts]
+arborfdm-cli = "arbor.cli:main"
+
+[project.gui-scripts]
+arborfdm = "arbor.app.main:main"
+
+[tool.setuptools.packages.find]
+include = ["arbor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: long running tests (large meshes, benchmarks)", "gui: needs Qt"]

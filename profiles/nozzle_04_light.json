@@ -1,0 +1,12 @@
+{
+  "inherits": "_nozzle_04",
+  "label": "0.4 mm, Light",
+  "description": "Fewer contacts, thinnest tips: easiest removal, smallest marks, less robust. Starting values, not validated on a specific printer or material.",
+  "values": {
+    "contact_spacing": 4.2,
+    "edge_spacing": 2.8,
+    "contact_density": 0.75,
+    "min_contact_distance": 1.0,
+    "tip_diameter": 0.405
+  }
+}

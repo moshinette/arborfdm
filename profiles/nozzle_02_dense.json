@@ -1,0 +1,12 @@
+{
+  "inherits": "_nozzle_02",
+  "label": "0.2 mm, Dense",
+  "description": "More contacts and thicker tips: maximum hold for heavy or tall parts, more marks. Starting values, not validated on a specific printer or material.",
+  "values": {
+    "contact_spacing": 1.76,
+    "edge_spacing": 1.12,
+    "contact_density": 1.35,
+    "min_contact_distance": 0.45,
+    "tip_diameter": 0.299
+  }
+}
