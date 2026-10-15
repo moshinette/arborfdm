@@ -61,13 +61,13 @@ arborfdm-cli generate examples/shelf.stl -o shelf_components.3mf --layout compon
 Pour chaque slicer et chaque fichier : noter la version, le dialogue affiché, la réponse donnée, si le modèle reste posé sur ses supports (vue de côté), si les supports apparaissent comme objet distinct, et le résultat de l'aperçu de tranchage (les pointes touchent-elles le modèle ?). Reporter ici avec la date.
 
 ---
-[^ps3mf]: PrusaSlicer `src/libslic3r/Format/3mf.cpp`, tag `version_2.9.6` : `VALID_OBJECT_TYPES`, `is_valid_object_type`, `_create_object_instance` — <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/libslic3r/Format/3mf.cpp>
-[^psplater]: PrusaSlicer `src/slic3r/GUI/Plater.cpp`, tag `version_2.9.6`, `load_files` (dialogue « Multi-part object detected », `ensure_on_bed(is_project_file)`) — <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/slic3r/GUI/Plater.cpp>
-[^psmodel]: PrusaSlicer `src/libslic3r/Model.cpp`, `ModelObject::ensure_on_bed` (`z_offset = -min_z` si `allow_negative_z` est faux) — <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/libslic3r/Model.cpp>
-[^psfr]: PrusaSlicer `src/libslic3r/FileReader.cpp`, `looks_like_multipart_object` (boîtes qui se chevauchent ou partagent une frontière) — <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/libslic3r/FileReader.cpp>
-[^orca3mf]: OrcaSlicer `src/libslic3r/Format/bbs_3mf.cpp` (main) : `BBS_VALID_OBJECT_TYPES` — <https://github.com/SoftFever/OrcaSlicer/blob/main/src/libslic3r/Format/bbs_3mf.cpp>
-[^orcaplater]: OrcaSlicer `src/slic3r/GUI/Plater.cpp` (main) : `looks_like_multipart_object`, `convert_multipart_object`, `ensure_on_bed(is_project_file)` — <https://github.com/SoftFever/OrcaSlicer/blob/main/src/slic3r/GUI/Plater.cpp>
-[^cura]: Cura `plugins/3MFReader/ThreeMFReader.py` (main) : nœuds par item, groupes pour les composants, `drop_to_buildplate`, `centerNodesToBuildPlate` — <https://github.com/Ultimaker/Cura/blob/main/plugins/3MFReader/ThreeMFReader.py>
-[^bambudrop]: Forum Bambu Lab, « Merge items Bambu Studio automatically drops to bed » — <https://forum.bambulab.com/t/merge-items-bambu-studio-automatically-drops-to-bed/139831>
-[^bambuwarn]: Forum Bambu Lab, « Warning message » (texte du dialogue multi-hauteurs, choix « Oui ») — <https://forum.bambulab.com/t/warning-message/110576>
-[^curaforum]: Forum UltiMaker, « How do you actually load parts in the position they were saved? » — <https://community.ultimaker.com/topic/43309-how-do-you-actually-load-parts-in-the-position-they-were-saved/>
+[^ps3mf]: PrusaSlicer `src/libslic3r/Format/3mf.cpp`, tag `version_2.9.6` : `VALID_OBJECT_TYPES`, `is_valid_object_type`, `_create_object_instance`, <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/libslic3r/Format/3mf.cpp>
+[^psplater]: PrusaSlicer `src/slic3r/GUI/Plater.cpp`, tag `version_2.9.6`, `load_files` (dialogue « Multi-part object detected », `ensure_on_bed(is_project_file)`), <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/slic3r/GUI/Plater.cpp>
+[^psmodel]: PrusaSlicer `src/libslic3r/Model.cpp`, `ModelObject::ensure_on_bed` (`z_offset = -min_z` si `allow_negative_z` est faux), <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/libslic3r/Model.cpp>
+[^psfr]: PrusaSlicer `src/libslic3r/FileReader.cpp`, `looks_like_multipart_object` (boîtes qui se chevauchent ou partagent une frontière), <https://github.com/prusa3d/PrusaSlicer/blob/version_2.9.6/src/libslic3r/FileReader.cpp>
+[^orca3mf]: OrcaSlicer `src/libslic3r/Format/bbs_3mf.cpp` (main) : `BBS_VALID_OBJECT_TYPES`, <https://github.com/SoftFever/OrcaSlicer/blob/main/src/libslic3r/Format/bbs_3mf.cpp>
+[^orcaplater]: OrcaSlicer `src/slic3r/GUI/Plater.cpp` (main) : `looks_like_multipart_object`, `convert_multipart_object`, `ensure_on_bed(is_project_file)`, <https://github.com/SoftFever/OrcaSlicer/blob/main/src/slic3r/GUI/Plater.cpp>
+[^cura]: Cura `plugins/3MFReader/ThreeMFReader.py` (main) : nœuds par item, groupes pour les composants, `drop_to_buildplate`, `centerNodesToBuildPlate`, <https://github.com/Ultimaker/Cura/blob/main/plugins/3MFReader/ThreeMFReader.py>
+[^bambudrop]: Forum Bambu Lab, « Merge items Bambu Studio automatically drops to bed », <https://forum.bambulab.com/t/merge-items-bambu-studio-automatically-drops-to-bed/139831>
+[^bambuwarn]: Forum Bambu Lab, « Warning message » (texte du dialogue multi-hauteurs, choix « Oui »), <https://forum.bambulab.com/t/warning-message/110576>
+[^curaforum]: Forum UltiMaker, « How do you actually load parts in the position they were saved? », <https://community.ultimaker.com/topic/43309-how-do-you-actually-load-parts-in-the-position-they-were-saved/>
