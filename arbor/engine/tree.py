@@ -1,0 +1,866 @@
+"""Tree routing: contact tips -> branches -> trunks -> feet.
+
+Overview (details and rationale in docs/research/supports.md):
+
+1. ModelGrid voxelizes the model once into vertical occupancy intervals per XY grid
+   column ("depth peeling" of every triangle over the grid centres). It answers
+   "is (x, y, z) inside the model", "where is the model top below this point" and
+   provides, per horizontal slab of height `segment_length`, a 2D distance field to
+   the model (scipy EDT).
+2. A bottom-up "reachability" pass (in the spirit of Cura's avoidance areas) marks, for
+   every routing level, the XY cells from which the build plate can be reached while
+   respecting the clearance and the maximum branch angle.
+3. Top-down routing, level by level: each active node moves down one level and
+   horizontally (at most dz * tan(branch_angle)) towards its nearest neighbour; nodes that
+   can meet in the same step are merged (greedy clustering on a KD-tree). Candidate
+   positions are scored (target distance, clearance, reachability). Nodes that cannot
+   reach the plate land on the model (MODEL_FOOT) when allowed, otherwise they fail and
+   are reported.
+4. Braces between tall neighbouring trunks, raft keep-out area.
+
+Extra data that SupportTree has no field for is attached as attributes on the tree
+instance (see _init_tree_extras): z_base, braces, foot_radius, failed, raft_keepout.
+"""
+from __future__ import annotations
+
+import math
+from typing import Optional
+
+import numpy as np
+import trimesh
+from scipy import ndimage
+from scipy.spatial import cKDTree
+
+from .params import SupportParams
+from .types import Contact, NodeKind, Progress, SupportTree
+
+BIG = 1000.0  # "far from the model" distance (mm)
+
+
+# ---------------------------------------------------------------------------
+# Model occupancy grid
+# ---------------------------------------------------------------------------
+class ModelGrid:
+    """Column voxelization of a (closed) triangle mesh on a regular XY grid.
+
+    For every grid cell centre the vertical line is intersected with all triangles; with
+    the sign of each triangle's Z orientation (entering / leaving the solid) the crossings
+    give the occupied intervals [lo, hi]. Columns with an inconsistent crossing count
+    (open meshes) are treated as fully occupied between their lowest and highest
+    crossing, which is conservative.
+    """
+
+    def __init__(self, mesh: trimesh.Trimesh, res: float,
+                 extra_points_xy: Optional[np.ndarray] = None, margin: float = 10.0):
+        V = np.asarray(mesh.vertices, dtype=np.float64)
+        F = np.asarray(mesh.faces, dtype=np.int64)
+        pts = V[:, :2] if len(V) else np.zeros((0, 2))
+        if extra_points_xy is not None and len(extra_points_xy):
+            pts = np.vstack([pts, np.asarray(extra_points_xy, float)[:, :2]])
+        if len(pts) == 0:
+            pts = np.zeros((1, 2))
+        lo = pts.min(0) - margin
+        hi = pts.max(0) + margin
+        self.res = float(res)
+        # irrational offset: no cell centre lies exactly on axis aligned model geometry
+        self.origin = lo - self.res * np.array([0.3819660113, 0.2763932022])
+        self.nx = int(math.ceil((hi[0] - self.origin[0]) / self.res)) + 1
+        self.ny = int(math.ceil((hi[1] - self.origin[1]) / self.res)) + 1
+        self.ncell = self.nx * self.ny
+        self._rasterize(V, F)
+
+    # -- construction --------------------------------------------------------
+    def _rasterize(self, V: np.ndarray, F: np.ndarray) -> None:
+        res, ox, oy, nx, ny = self.res, self.origin[0], self.origin[1], self.nx, self.ny
+        cells_l, z_l, s_l = [], [], []
+        if len(F):
+            T = V[F]
+            x, y, z = T[:, :, 0], T[:, :, 1], T[:, :, 2]
+            a2 = (x[:, 1] - x[:, 0]) * (y[:, 2] - y[:, 0]) - (x[:, 2] - x[:, 0]) * (y[:, 1] - y[:, 0])
+            keep = np.abs(a2) > 1e-14
+            x, y, z, a2 = x[keep], y[keep], z[keep], a2[keep]
+            i0 = np.ceil((x.min(1) - ox) / res - 0.5).astype(np.int64)
+            i1 = np.floor((x.max(1) - ox) / res - 0.5).astype(np.int64)
+            j0 = np.ceil((y.min(1) - oy) / res - 0.5).astype(np.int64)
+            j1 = np.floor((y.max(1) - oy) / res - 0.5).astype(np.int64)
+            i0, j0 = np.maximum(i0, 0), np.maximum(j0, 0)
+            i1, j1 = np.minimum(i1, nx - 1), np.minimum(j1, ny - 1)
+            ni = np.maximum(i1 - i0 + 1, 0)
+            nj = np.maximum(j1 - j0 + 1, 0)
+            cnt = ni * nj
+            sel = np.nonzero(cnt > 0)[0]
+            # process in chunks bounded by the number of (triangle, cell) pairs
+            csum = np.cumsum(cnt[sel])
+            chunk = 1_000_000
+            start = 0
+            while start < len(sel):
+                base = csum[start - 1] if start > 0 else 0
+                stop = int(np.searchsorted(csum, base + chunk, side="right"))
+                stop = max(stop, start + 1)
+                t = sel[start:stop]
+                start = stop
+                c = cnt[t]
+                tt = np.repeat(t, c)
+                offs = np.arange(c.sum()) - np.repeat(np.cumsum(c) - c, c)
+                ii = i0[tt] + offs % ni[tt]
+                jj = j0[tt] + offs // ni[tt]
+                px = ox + (ii + 0.5) * res
+                py = oy + (jj + 0.5) * res
+                X, Y, Z, A = x[tt], y[tt], z[tt], a2[tt]
+                w0 = ((X[:, 1] - px) * (Y[:, 2] - py) - (X[:, 2] - px) * (Y[:, 1] - py)) / A
+                w1 = ((X[:, 2] - px) * (Y[:, 0] - py) - (X[:, 0] - px) * (Y[:, 2] - py)) / A
+                w2 = 1.0 - w0 - w1
+                eps = -1e-9
+                inside = (w0 >= eps) & (w1 >= eps) & (w2 >= eps)
+                if not inside.any():
+                    continue
+                zz = w0 * Z[:, 0] + w1 * Z[:, 1] + w2 * Z[:, 2]
+                cells_l.append((jj * nx + ii)[inside])
+                z_l.append(zz[inside])
+                # a2 > 0: face normal points up: moving up we leave the solid
+                s_l.append(np.where(A[inside] > 0, -1, 1).astype(np.int8))
+        if cells_l:
+            cell = np.concatenate(cells_l)
+            zc = np.concatenate(z_l)
+            sg = np.concatenate(s_l).astype(np.int64)
+        else:
+            cell = np.zeros(0, np.int64)
+            zc = np.zeros(0)
+            sg = np.zeros(0, np.int64)
+        order = np.lexsort((sg, zc, cell))
+        cell, zc, sg = cell[order], zc[order], sg[order]
+        if len(cell):
+            dup = np.zeros(len(cell), bool)
+            dup[1:] = (cell[1:] == cell[:-1]) & (np.abs(zc[1:] - zc[:-1]) < 1e-7) & (sg[1:] == sg[:-1])
+            cell, zc, sg = cell[~dup], zc[~dup], sg[~dup]
+        lo_l, hi_l, c_l = [], [], []
+        if len(cell):
+            cs = np.cumsum(sg)
+            first = np.ones(len(cell), bool)
+            first[1:] = cell[1:] != cell[:-1]
+            grp_start = np.maximum.accumulate(np.where(first, np.arange(len(cell)), 0))
+            before_first = np.where(grp_start > 0, cs[np.maximum(grp_start - 1, 0)], 0)
+            after = cs - before_first
+            before = after - sg
+            starts = (before <= 0) & (after > 0)
+            ends = (before > 0) & (after <= 0)
+            ucell, inv = np.unique(cell, return_inverse=True)
+            n_s = np.bincount(inv, weights=starts, minlength=len(ucell))
+            n_e = np.bincount(inv, weights=ends, minlength=len(ucell))
+            last = np.ones(len(cell), bool)
+            last[:-1] = cell[1:] != cell[:-1]
+            final = np.zeros(len(ucell))
+            final[inv[last]] = after[last]
+            good_cell = (n_s == n_e) & (final == 0)
+            g = good_cell[inv]
+            si = np.nonzero(starts & g)[0]
+            ei = np.nonzero(ends & g)[0]
+            lo_l.append(zc[si]); hi_l.append(zc[ei]); c_l.append(cell[si])
+            bad = np.nonzero(~good_cell)[0]
+            if len(bad):
+                zmin = np.full(len(ucell), np.inf)
+                zmax = np.full(len(ucell), -np.inf)
+                np.minimum.at(zmin, inv, zc)
+                np.maximum.at(zmax, inv, zc)
+                lo_l.append(zmin[bad]); hi_l.append(zmax[bad]); c_l.append(ucell[bad])
+            self.n_bad_columns = int(len(bad))
+        else:
+            self.n_bad_columns = 0
+        if c_l:
+            ic = np.concatenate(c_l); il = np.concatenate(lo_l); ih = np.concatenate(hi_l)
+        else:
+            ic = np.zeros(0, np.int64); il = np.zeros(0); ih = np.zeros(0)
+        keep = ih > il
+        ic, il, ih = ic[keep], il[keep], ih[keep]
+        o = np.lexsort((il, ic))
+        self.iv_cell, self.iv_lo, self.iv_hi = ic[o], il[o], ih[o]
+
+    # -- queries --------------------------------------------------------------
+    def cell_index(self, xy: np.ndarray):
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        i = np.floor((xy[:, 0] - self.origin[0]) / self.res).astype(np.int64)
+        j = np.floor((xy[:, 1] - self.origin[1]) / self.res).astype(np.int64)
+        inside = (i >= 0) & (i < self.nx) & (j >= 0) & (j < self.ny)
+        return np.clip(i, 0, self.nx - 1), np.clip(j, 0, self.ny - 1), inside
+
+    def _intervals(self, cell: int):
+        a = np.searchsorted(self.iv_cell, cell, side="left")
+        b = np.searchsorted(self.iv_cell, cell, side="right")
+        return self.iv_lo[a:b], self.iv_hi[a:b]
+
+    def inside(self, p) -> bool:
+        i, j, ok = self.cell_index(np.asarray(p, float)[:2])
+        if not ok[0]:
+            return False
+        lo, hi = self._intervals(int(j[0] * self.nx + i[0]))
+        return bool(np.any((lo <= p[2]) & (hi >= p[2])))
+
+    def top_below(self, xy, z: float) -> Optional[float]:
+        """Highest model surface at or below z in the column of xy (None if none)."""
+        i, j, ok = self.cell_index(np.asarray(xy, float)[:2])
+        if not ok[0]:
+            return None
+        lo, hi = self._intervals(int(j[0] * self.nx + i[0]))
+        m = lo <= z + 1e-6
+        if not m.any():
+            return None
+        return float(min(hi[m].max(), z))
+
+    def footprint_below(self, z: float) -> np.ndarray:
+        """(ny, nx) bool: cells where the model has material below height z."""
+        occ = np.zeros(self.ncell, bool)
+        occ[self.iv_cell[self.iv_lo < z]] = True
+        return occ.reshape(self.ny, self.nx)
+
+    def slab_distances(self, z_base: float, dz: float, n_slabs: int) -> np.ndarray:
+        """(n_slabs, ny, nx) float16: conservative XY distance to the model within each
+        slab [z_base + k dz, z_base + (k+1) dz]. Slab 0 also covers everything below."""
+        out = np.empty((n_slabs, self.ny, self.nx), np.float16)
+        eps = 1e-6
+        klo = np.floor((self.iv_lo - z_base) / dz + eps).astype(np.int64)
+        khi = np.ceil((self.iv_hi - z_base) / dz - eps).astype(np.int64) - 1
+        klo = np.clip(klo, 0, None)
+        khi = np.clip(khi, 0, None)
+        CH = 32
+        for k0 in range(0, n_slabs, CH):
+            k1 = min(n_slabs, k0 + CH)
+            m = (khi >= k0) & (klo < k1)
+            diff = np.zeros((k1 - k0 + 1, self.ncell), np.int32)
+            if m.any():
+                a = np.clip(klo[m], k0, k1) - k0
+                b = np.clip(khi[m] + 1, k0, k1) - k0
+                np.add.at(diff, (a, self.iv_cell[m]), 1)
+                np.add.at(diff, (b, self.iv_cell[m]), -1)
+            occ = np.cumsum(diff, axis=0)[:-1] > 0
+            for k in range(k1 - k0):
+                o = occ[k].reshape(self.ny, self.nx)
+                if not o.any():
+                    out[k0 + k] = BIG
+                    continue
+                d = ndimage.distance_transform_edt(~o) * self.res - 0.75 * self.res
+                d[o] = 0.0
+                out[k0 + k] = np.clip(d, 0.0, BIG)
+        return out
+
+
+def grid_resolution(params: SupportParams, extent_xy: float, n_slabs: int) -> float:
+    res = min(max(0.5 * min(params.xy_clearance, params.branch_min_diameter), 0.15), 0.5)
+    # memory guard: keep slabs * cells around 40 M (float16 distances + bool masks)
+    cells = (extent_xy / res) ** 2
+    if cells * max(n_slabs, 1) > 40e6:
+        res = extent_xy / math.sqrt(40e6 / max(n_slabs, 1))
+    return res
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def _init_tree_extras(tree: SupportTree, z_base: float) -> None:
+    tree.z_base = z_base            # build plate or raft top
+    tree.braces = []                # list of (p0, p1, radius)
+    tree.foot_radius = {}           # FOOT node id -> disk radius actually used
+    tree.failed = {}                # contact id -> reason (not routed)
+    tree.raft_keepout = None        # shapely geometry the raft must avoid (model footprint)
+
+
+def tip_direction(normal: np.ndarray, max_angle_deg: float, extra_tilt: bool = False) -> np.ndarray:
+    """Unit vector from the contact point to the tip base: downward, tilted towards the
+    surface normal (so the tip leaves the surface) but never more than max_angle_deg
+    from vertical."""
+    n = np.asarray(normal, float)
+    ln = np.linalg.norm(n)
+    n = n / ln if ln > 1e-12 else np.array([0.0, 0.0, -1.0])
+    amax = math.radians(max_angle_deg)
+    nh = n[:2]
+    lh = float(np.linalg.norm(nh))
+    if lh < 1e-9:
+        return np.array([0.0, 0.0, -1.0])
+    theta = math.acos(float(np.clip(-n[2], -1.0, 1.0)))
+    theta = amax if extra_tilt else min(theta, amax)
+    h = nh / lh
+    return np.array([math.sin(theta) * h[0], math.sin(theta) * h[1], -math.cos(theta)])
+
+
+def _disc_pattern() -> np.ndarray:
+    pts = [(0.0, 0.0)]
+    for frac, n in ((0.34, 8), (0.67, 12), (1.0, 16)):
+        a = np.arange(n) * 2 * math.pi / n + (0.2 if n == 12 else 0.0)
+        pts += list(zip(frac * np.cos(a), frac * np.sin(a)))
+    return np.asarray(pts)
+
+
+_PATTERN = _disc_pattern()
+
+
+class _UF:
+    def __init__(self, n):
+        self.p = list(range(n))
+
+    def find(self, a):
+        while self.p[a] != a:
+            self.p[a] = self.p[self.p[a]]
+            a = self.p[a]
+        return a
+
+
+# ---------------------------------------------------------------------------
+# main entry point
+# ---------------------------------------------------------------------------
+def build_tree(mesh: trimesh.Trimesh, contacts: list[Contact], params: SupportParams,
+               progress: Progress) -> SupportTree:
+    progress = progress or Progress()
+    z_base = params.raft_thickness if params.raft_enabled else 0.0
+    tree = SupportTree()
+    _init_tree_extras(tree, z_base)
+    contacts = [c for c in contacts if c.enabled]
+    for c in contacts:
+        c.rests_on_model = False
+    if not contacts:
+        return tree
+    router = _Router(mesh, contacts, params, tree, progress)
+    router.run()
+    return tree
+
+
+class _Router:
+    def __init__(self, mesh, contacts, params: SupportParams, tree: SupportTree, progress: Progress):
+        self.mesh, self.contacts, self.P, self.tree, self.progress = mesh, contacts, params, tree, progress
+        self.zb = tree.z_base
+        self.dz = max(params.segment_length, 0.2)
+        self.tan = math.tan(math.radians(params.branch_angle_deg))
+        self.r_min = params.branch_min_diameter / 2
+        self.r_trunk = params.trunk_diameter / 2
+        self.r_tipbase = params.tip_base_diameter / 2
+        self.hard = 0.1  # mm: minimum gap between a branch surface and the model
+
+    # -- setup ----------------------------------------------------------------
+    def run(self) -> None:
+        P, tree = self.P, self.tree
+        prog = self.progress
+        prog.update(0.0, "Preparing model grid")
+        cpos = np.array([c.position for c in self.contacts], float)
+        zmax = max(float(cpos[:, 2].max()), self.zb) + 1.0
+        n_slabs = int(math.ceil((zmax - self.zb) / self.dz)) + 2
+        ext = float(np.ptp(np.vstack([np.asarray(self.mesh.vertices)[:, :2], cpos[:, :2]]), axis=0).max()) \
+            if len(self.mesh.vertices) else float(np.ptp(cpos[:, :2], axis=0).max())
+        margin = max(P.merge_distance, P.foot_diameter, P.brace_max_length) + 5.0
+        res = grid_resolution(P, ext + 2 * margin, n_slabs)
+        self.grid = ModelGrid(self.mesh, res, cpos[:, :2], margin=margin)
+        prog.update(0.15, "Model distance field")
+        self.dist = self.grid.slab_distances(self.zb, self.dz, n_slabs)
+        self.n_slabs = n_slabs
+        prog.update(0.3, "Reachability")
+        self._reachability()
+        prog.update(0.4, "Tips")
+        self._make_tips()
+        self._route()
+        prog.update(0.9, "Braces")
+        self._cleanup()
+        if P.braces_enabled:
+            self._braces()
+        if P.raft_enabled:
+            self._raft_keepout()
+        prog.update(1.0, "Tree done")
+
+    # distance of xy points to the model in slab k (vectorized, k scalar)
+    def mdist(self, k: int, xy: np.ndarray) -> np.ndarray:
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        if k < 0:
+            k = 0
+        if k >= self.n_slabs:
+            return np.full(len(xy), BIG)
+        i, j, ok = self.grid.cell_index(xy)
+        d = self.dist[k, j, i].astype(np.float64)
+        d[~ok] = BIG
+        return d
+
+    def reach(self, k: int, xy: np.ndarray) -> np.ndarray:
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        if k < 0:
+            k = 0
+        if k >= self.n_slabs:
+            return np.ones(len(xy), bool)
+        i, j, ok = self.grid.cell_index(xy)
+        r = self.D[k, j, i].copy()
+        r[~ok] = True
+        return r
+
+    def _reachability(self) -> None:
+        """D[k]: a node may stand at level k (z_base + k dz) at this cell and still reach
+        the plate. D[k] = F[k] & dilate(D[k-1], move) with F[k] the cells of slab k that
+        keep the reach clearance from the model."""
+        c = self.P.xy_clearance + self.r_min
+        move = self.dz * self.tan
+        rad = move / self.grid.res
+        ri = int(math.floor(rad))
+        if ri >= 1:
+            yy, xx = np.mgrid[-ri:ri + 1, -ri:ri + 1]
+            st = (xx ** 2 + yy ** 2) <= rad ** 2 + 1e-9
+        else:
+            st = None
+        D = np.empty(self.dist.shape, bool)
+        D[0] = self.dist[0] >= c
+        for k in range(1, self.n_slabs):
+            F = self.dist[k] >= c
+            if F.all():
+                D[k] = True
+                continue
+            prev = D[k - 1]
+            dil = ndimage.binary_dilation(prev, structure=st) if st is not None else prev
+            D[k] = F & dil
+        self.D = D
+
+    # -- tips ---------------------------------------------------------------
+    def _make_tips(self) -> None:
+        P, tree, zb, dz = self.P, self.tree, self.zb, self.dz
+        self.pending = []  # (start level, node id, max move, nominal radius)
+        for c in self.contacts:
+            pos = np.asarray(c.position, float)
+            n = np.asarray(c.normal, float)
+            ln = np.linalg.norm(n)
+            n = n / ln if ln > 1e-12 else np.array([0.0, 0.0, -1.0])
+            tip_d = c.tip_diameter if c.tip_diameter else P.tip_diameter
+            tip_r = tip_d / 2
+            u = tip_direction(n, P.branch_angle_deg)
+            base = pos + u * P.tip_length
+            if self.grid.inside(base) or self.mdist(int((base[2] - zb) // dz), base[:2])[0] < 1e-3:
+                u2 = tip_direction(n, P.branch_angle_deg, extra_tilt=True)
+                b2 = pos + u2 * P.tip_length
+                if not self.grid.inside(b2):
+                    u, base = u2, b2
+            if P.tip_shape == "ball":
+                tip_pos = pos + n * (tip_r - P.tip_penetration)
+            else:
+                tip_pos = pos - n * P.tip_penetration
+            tip_pos = tip_pos - np.array([0.0, 0.0, P.z_gap])
+            if pos[2] - zb < 0.05:
+                tree.failed[c.id] = "contact lies on the build plate"
+                continue
+            if self.grid.inside(base):
+                tree.failed[c.id] = "tip base would be inside the model (surface faces up?)"
+                continue
+            tip = tree.add(tip_pos, tip_r, NodeKind.TIP, contact_id=c.id)
+            if base[2] < zb + 0.5 * dz:
+                # contact close to the plate: the tip goes straight to a foot
+                t = (pos[2] - zb) / max(-u[2], 1e-6)
+                fpos = pos + u * t
+                fpos[2] = zb
+                f = tree.add(fpos, max(self.r_tipbase, tip_r), NodeKind.FOOT)
+                tip.parent = f.id
+                tree.foot_radius[f.id] = self._foot_r(fpos, f.radius)
+                continue
+            b = tree.add(base, self.r_tipbase, NodeKind.BRANCH, contact_id=c.id)
+            tip.parent = b.id
+            kb = int(math.floor((base[2] - zb) / dz + 1e-9))
+            if base[2] - (zb + kb * dz) < 0.3 * dz and kb >= 1:
+                kb -= 1
+            kb = min(kb, self.n_slabs - 1)
+            move = (base[2] - (zb + kb * dz)) * self.tan
+            self.pending.append((kb, b.id, move, max(self.r_min, self.r_tipbase)))
+        self.pending.sort(key=lambda t: -t[0])
+
+    def _foot_r(self, pos, r_node) -> float:
+        """Foot disk radius: foot_diameter / 2, shrunk to keep 0.2 mm from the model
+        within the foot + collar height, never below the node radius."""
+        P = self.P
+        k_top = int(math.ceil((P.foot_height + P.collar_height) / self.dz))
+        md = min(self.mdist(k, pos[:2])[0] for k in range(0, k_top + 1))
+        fr = min(P.foot_diameter / 2, md - 0.2)
+        return float(max(fr, r_node))
+
+    # -- routing ---------------------------------------------------------------
+    def _route(self) -> None:
+        P, tree, zb, dz = self.P, self.tree, self.zb, self.dz
+        act_id = np.zeros(0, np.int64)
+        act_r = np.zeros(0)          # nominal radius
+        act_merged = np.zeros(0, bool)
+        pend = self.pending
+        pi = 0
+        top = pend[0][0] if pend else -1
+        full_move = dz * self.tan
+        self.landed: list[int] = []
+        self.fail_nodes: dict[int, str] = {}
+        for j in range(top, -1, -1):
+            if j % 4 == 0:
+                self.progress.update(0.4 + 0.5 * (1 - j / max(top, 1)), "Routing branches")
+            new_ids, new_r, new_m = [], [], []
+            while pi < len(pend) and pend[pi][0] == j:
+                _, nid, mv, rr = pend[pi]
+                new_ids.append(nid); new_m.append(mv); new_r.append(rr)
+                pi += 1
+            ids = np.concatenate([act_id, np.asarray(new_ids, np.int64)])
+            if len(ids) == 0:
+                continue
+            rn = np.concatenate([act_r, np.asarray(new_r)])
+            merged = np.concatenate([act_merged, np.zeros(len(new_ids), bool)])
+            move = np.concatenate([np.full(len(act_id), full_move), np.asarray(new_m)])
+            act_id, act_r, act_merged = self._step(j, ids, rn, merged, move)
+        # anything left active after level 0 has become a foot inside _step
+
+    def _grow(self, r: np.ndarray, merged: np.ndarray, h: float) -> np.ndarray:
+        P = self.P
+        g = P.trunk_growth_per_mm / 2 * h
+        taper = max(P.trunk_growth_per_mm / 2, (self.r_trunk - self.r_min) / 10.0) * h
+        branch = (~merged) & (r < self.r_trunk)
+        out = r + g
+        out[branch] = np.minimum(self.r_trunk, r[branch] + taper[branch])
+        return out
+
+    def _step(self, j: int, ids, rn, merged, move):
+        P, tree, zb, dz = self.P, self.tree, self.zb, self.dz
+        N = len(ids)
+        pos = np.array([tree.nodes[i].position for i in ids])
+        xy = pos[:, :2]
+        zj = zb + j * dz
+        h = pos[:, 2] - zj
+        r_next = self._grow(rn, merged, np.maximum(h, 0.0))
+
+        # candidates (N, C, 2)
+        C = len(_PATTERN)
+        cand = xy[:, None, :] + _PATTERN[None, :, :] * move[:, None, None]
+        flat = cand.reshape(-1, 2)
+        md = self.mdist(j, flat).reshape(N, C)
+        mid = (0.5 * (cand + xy[:, None, :])).reshape(-1, 2)
+        md_mid = self.mdist(j, mid).reshape(N, C)
+        reach = self.reach(j, flat).reshape(N, C)
+        hard_ok = (md >= self.r_min + self.hard) & (md_mid >= 0.5 * self.r_min)
+        plate_ok = np.any(hard_ok & reach, axis=1)
+
+        # ----- nearest neighbour targets -------------------------------------
+        target = xy.copy()
+        nb = np.full(N, -1)
+        if N > 1:
+            kd = cKDTree(xy)
+            k = min(8, N)
+            dd, ii = kd.query(xy, k=k)
+            for a in range(N):
+                for d, b in zip(dd[a][1:], ii[a][1:]):
+                    if d > P.merge_distance:
+                        break
+                    if plate_ok[b] == plate_ok[a]:
+                        nb[a] = b
+                        target[a] = 0.5 * (xy[a] + xy[b])
+                        break
+                # repulsion from incompatible close nodes (min_tree_distance)
+                for d, b in zip(dd[a][1:], ii[a][1:]):
+                    if d > rn[a] + rn[b] + P.min_tree_distance:
+                        break
+                    if plate_ok[b] != plate_ok[a] and d > 1e-9:
+                        target[a] = target[a] + (xy[a] - xy[b]) / d * move[a]
+
+        # nodes that cannot reach the plate head for the nearest reachable cell when
+        # they may not stand on the model (or when they have no neighbour to join)
+        lost = np.nonzero(~plate_ok)[0]
+        if len(lost) and j > 0:
+            near = self._nearest_reachable(j - 1)
+            if near is not None:
+                for a in lost:
+                    if P.allow_on_model and nb[a] >= 0:
+                        continue
+                    i_, j_, ok_ = self.grid.cell_index(xy[a])
+                    if not ok_[0]:
+                        continue
+                    jj, ii = near[0][j_[0], i_[0]], near[1][j_[0], i_[0]]
+                    if not P.allow_on_model:
+                        target[a] = self.grid.origin + (np.array([ii, jj]) + 0.5) * self.grid.res
+
+        # ----- merging (greedy clustering of mutually reachable pairs) ---------
+        uf = _UF(N)
+        members = {i: [i] for i in range(N)}
+        cen = {i: xy[i].copy() for i in range(N)}
+        pairs = []
+        if N > 1:
+            for a, b in cKDTree(xy).query_pairs(r=2 * float(move.max()) + 1e-9):
+                if plate_ok[a] != plate_ok[b]:
+                    continue
+                d = float(np.linalg.norm(xy[a] - xy[b]))
+                if d <= move[a] + move[b] + 1e-9:
+                    pairs.append((d, int(a), int(b)))
+        pairs.sort()
+        for d, a, b in pairs:
+            ra, rb = uf.find(a), uf.find(b)
+            if ra == rb:
+                continue
+            mem = members[ra] + members[rb]
+            c = self._meeting_point(xy[mem], rn[mem], move[mem])
+            if c is None:
+                continue
+            rr = self._merged_radius(r_next[mem])
+            mdc = self.mdist(j, c)[0]
+            if mdc < self.r_min + self.hard:
+                continue
+            if plate_ok[mem].any() and not self.reach(j, c)[0]:
+                continue
+            uf.p[rb] = ra
+            members[ra] = mem
+            cen[ra] = c
+            del members[rb]
+
+        new_ids, new_r, new_merged = [], [], []
+        kind_level = NodeKind.FOOT if j == 0 else None
+        for root, mem in members.items():
+            if len(mem) > 1:
+                c = cen[root]
+                rr = self._merged_radius(r_next[mem])
+                mdc = self.mdist(j, c)[0]
+                reff = max(self.r_min, min(rr, mdc - self.hard))
+                node = tree.add([c[0], c[1], zj], reff, kind_level or NodeKind.TRUNK)
+                for m_ in mem:
+                    tree.nodes[int(ids[m_])].parent = node.id
+                self._after_place(node, j, rr, True, new_ids, new_r, new_merged)
+                continue
+            a = mem[0]
+            nid = int(ids[a])
+            # model-mode node: land on the model when it gets close above it
+            if not plate_ok[a] and P.allow_on_model:
+                topz = self.grid.top_below(xy[a], pos[a, 2])
+                land_len = P.tip_length + 2 * rn[a]
+                if topz is not None and pos[a, 2] - topz <= land_len + dz:
+                    self._land(nid, xy[a], pos[a, 2], topz, rn[a])
+                    continue
+            ok = hard_ok[a]
+            if not ok.any():
+                self._blocked(nid, xy[a], pos[a, 2], rn[a])
+                continue
+            # score the candidates
+            d2 = np.sum((cand[a] - target[a]) ** 2, axis=1)
+            soft = np.clip(r_next[a] + P.xy_clearance - md[a], 0.0, None)
+            score = d2 + 20.0 * soft ** 2 + 0.01 * np.linalg.norm(cand[a] - xy[a], axis=1)
+            if plate_ok[a]:
+                score = score + np.where(reach[a], 0.0, 1e4)
+            score = np.where(ok, score, np.inf)
+            # the exact (clamped) target is a better candidate when it is valid
+            t = target[a] - xy[a]
+            lt = float(np.linalg.norm(t))
+            q = cand[a][int(np.argmin(score))]
+            best = float(score.min())
+            if lt > 1e-9:
+                qt = xy[a] + t * min(1.0, move[a] / lt)
+                mdt = self.mdist(j, qt)[0]
+                mdm = self.mdist(j, 0.5 * (qt + xy[a]))[0]
+                if mdt >= self.r_min + self.hard and mdm >= 0.5 * self.r_min and \
+                        (not plate_ok[a] or self.reach(j, qt)[0]):
+                    st = float(np.sum((qt - target[a]) ** 2)) + \
+                        20.0 * max(0.0, r_next[a] + P.xy_clearance - mdt) ** 2 + 0.01 * min(lt, move[a])
+                    if st <= best:
+                        q = qt
+            mdq = self.mdist(j, q)[0]
+            reff = max(self.r_min, min(r_next[a], mdq - self.hard))
+            is_trunk = merged[a] or r_next[a] >= self.r_trunk - 1e-9
+            kind = kind_level or (NodeKind.TRUNK if is_trunk else NodeKind.BRANCH)
+            node = tree.add([q[0], q[1], zj], reff, kind)
+            tree.nodes[nid].parent = node.id
+            self._after_place(node, j, r_next[a], bool(merged[a]), new_ids, new_r, new_merged)
+        return (np.asarray(new_ids, np.int64), np.asarray(new_r, float), np.asarray(new_merged, bool))
+
+    @staticmethod
+    def _meeting_point(pts: np.ndarray, r: np.ndarray, mv: np.ndarray):
+        """A point every member can reach in this step (|c - p_i| <= move_i), biased
+        towards the thicker members, or None."""
+        w = r ** 2
+        cands = [(pts * w[:, None]).sum(0) / w.sum(), pts.mean(0)]
+        if len(pts) == 2:
+            d = float(np.linalg.norm(pts[1] - pts[0]))
+            if d > 1e-12:
+                t = np.clip(mv[0] / d, 0.0, 1.0)
+                lo = max(0.0, 1.0 - mv[1] / d)
+                tw = float(np.clip(w[1] / w.sum(), lo, t))
+                cands.insert(0, pts[0] + tw * (pts[1] - pts[0]))
+        for c in cands:
+            if np.all(np.linalg.norm(pts - c, axis=1) <= mv + 1e-9):
+                return c
+        return None
+
+    def _nearest_reachable(self, k: int):
+        if not hasattr(self, "_near_cache"):
+            self._near_cache = {}
+        if k not in self._near_cache:
+            D = self.D[k]
+            if not D.any():
+                self._near_cache[k] = None
+            else:
+                _, ind = ndimage.distance_transform_edt(~D, return_indices=True)
+                self._near_cache[k] = (ind[0], ind[1])
+        return self._near_cache[k]
+
+    def _merged_radius(self, rs: np.ndarray) -> float:
+        P = self.P
+        area = math.sqrt(float(np.sum(rs ** 2)))
+        return max(self.r_trunk, float(rs.max()), min(area, P.branch_max_diameter / 2))
+
+    def _after_place(self, node, j, r_nom, merged, new_ids, new_r, new_merged) -> None:
+        if j == 0:
+            node.kind = NodeKind.FOOT
+            self.tree.foot_radius[node.id] = self._foot_r(node.position, node.radius)
+            return
+        new_ids.append(node.id)
+        new_r.append(r_nom)
+        new_merged.append(merged)
+
+    def _land(self, nid: int, xy, z: float, topz: float, r_nom: float) -> None:
+        P, tree = self.P, self.tree
+        parent_id = nid
+        if z - topz > P.tip_length + 0.2:
+            mid = tree.add([xy[0], xy[1], topz + P.tip_length],
+                           max(self.r_min, self.r_tipbase), NodeKind.BRANCH)
+            tree.nodes[parent_id].parent = mid.id
+            parent_id = mid.id
+        foot = tree.add([xy[0], xy[1], topz - P.tip_penetration], P.on_model_tip_diameter / 2,
+                        NodeKind.MODEL_FOOT)
+        tree.nodes[parent_id].parent = foot.id
+        self.landed.append(foot.id)
+
+    def _blocked(self, nid: int, xy, z: float, r_nom: float) -> None:
+        """No valid position below: land on the model if allowed, else fail."""
+        if self.P.allow_on_model:
+            topz = self.grid.top_below(xy, z)
+            if topz is None:
+                # the blocking model is beside the column: search the disc for material
+                best = None
+                for off in _PATTERN[1:] * (self.dz * self.tan + 2 * r_nom):
+                    t = self.grid.top_below(xy + off, z)
+                    if t is not None and (best is None or t > best[0]):
+                        best = (t, xy + off)
+                if best is not None:
+                    self._land(nid, best[1], z, best[0], r_nom)
+                    return
+            else:
+                self._land(nid, xy, z, topz, r_nom)
+                return
+            self.fail_nodes[nid] = "blocked by the model, no landing surface found"
+        else:
+            self.fail_nodes[nid] = ("cannot reach the build plate within the branch angle "
+                                    "and supports on the model are disabled")
+
+    # -- cleanup ------------------------------------------------------------------
+    def _cleanup(self) -> None:
+        tree = self.tree
+        root_of: dict[int, int] = {}
+
+        def root(i):
+            path = []
+            while i not in root_of:
+                n = tree.nodes[i]
+                if n.parent is None:
+                    root_of[i] = i
+                    break
+                path.append(i)
+                i = n.parent
+            r = root_of[i]
+            for p in path:
+                root_of[p] = r
+            return r
+
+        for i in list(tree.nodes):
+            root(i)
+        bad_roots = {i for i in tree.nodes if tree.nodes[i].parent is None and
+                     tree.nodes[i].kind not in (NodeKind.FOOT, NodeKind.MODEL_FOOT)}
+        if bad_roots:
+            for i in list(tree.nodes):
+                r = root_of[i]
+                if r in bad_roots:
+                    n = tree.nodes[i]
+                    if n.kind == NodeKind.TIP and n.contact_id is not None:
+                        tree.failed[n.contact_id] = self.fail_nodes.get(r, "could not be routed")
+                    del tree.nodes[i]
+        model_roots = {i for i, n in tree.nodes.items() if n.kind == NodeKind.MODEL_FOOT}
+        by_id = {c.id: c for c in self.contacts}
+        for i, n in tree.nodes.items():
+            if n.kind == NodeKind.TIP and n.contact_id in by_id:
+                by_id[n.contact_id].rests_on_model = root_of[i] in model_roots
+        for cid, why in tree.failed.items():
+            if cid in by_id:
+                by_id[cid].rests_on_model = False
+
+    # -- braces -----------------------------------------------------------------------
+    def _braces(self) -> None:
+        P, tree, zb = self.P, self.tree, self.zb
+        ch = tree.children()
+        trunks = []
+        for f in tree.roots():
+            if f.kind != NodeKind.FOOT:
+                continue
+            path = [f.id]
+            cur = f.id
+            while len(ch[cur]) == 1 and tree.nodes[ch[cur][0]].kind != NodeKind.TIP:
+                cur = ch[cur][0]
+                path.append(cur)
+            pts = np.array([tree.nodes[i].position for i in path])
+            rad = np.array([tree.nodes[i].radius for i in path])
+            if len(pts) < 2 or pts[-1, 2] - zb <= P.brace_min_height:
+                continue
+            if np.any(np.diff(pts[:, 2]) <= 0):
+                continue
+            trunks.append((pts, rad))
+        if len(trunks) < 2:
+            return
+        fxy = np.array([t[0][0, :2] for t in trunks])
+        kd = cKDTree(fxy)
+        pairs = set()
+        for a in range(len(trunks)):
+            d, ii = kd.query(fxy[a], k=min(3, len(trunks)))
+            for dist, b in zip(np.atleast_1d(d)[1:], np.atleast_1d(ii)[1:]):
+                if dist <= P.brace_max_length * 1.5:
+                    pairs.add((min(a, int(b)), max(a, int(b))))
+        rb = P.brace_diameter / 2
+        tana = math.tan(math.radians(max(P.branch_angle_deg, 1.0)))
+
+        def at(tr, z):
+            pts, rad = tr
+            x = np.interp(z, pts[:, 2], pts[:, 0])
+            y = np.interp(z, pts[:, 2], pts[:, 1])
+            return np.array([x, y, z]), float(np.interp(z, pts[:, 2], rad))
+
+        for a, b in sorted(pairs):
+            ta, tb = trunks[a], trunks[b]
+            ztop = min(ta[0][-1, 2], tb[0][-1, 2]) - 0.5
+            i = 1
+            flip = False
+            while True:
+                z0 = zb + P.brace_spacing_z * i
+                if z0 >= ztop:
+                    break
+                i += 1
+                lo_t, hi_t = (ta, tb) if not flip else (tb, ta)
+                p0, r0 = at(lo_t, z0)
+                q0, _ = at(hi_t, z0)
+                d = float(np.linalg.norm(p0[:2] - q0[:2]))
+                if d > P.brace_max_length or d < r0 + 1.0:
+                    continue
+                rise = d / tana
+                z1 = z0 + rise
+                if z1 >= ztop:
+                    continue
+                p1, _ = at(hi_t, z1)
+                if np.linalg.norm(p1[:2] - p0[:2]) > P.brace_max_length:
+                    continue
+                s = np.linspace(0.15, 0.85, 8)
+                pts = p0[None, :] + s[:, None] * (p1 - p0)[None, :]
+                okb = True
+                for pt in pts:
+                    k = int((pt[2] - zb) // self.dz)
+                    if self.mdist(k, pt[:2])[0] < rb + 0.5 * P.xy_clearance:
+                        okb = False
+                        break
+                if okb:
+                    tree.braces.append((p0, p1, rb))
+                    flip = not flip
+
+    def _raft_keepout(self) -> None:
+        from shapely.geometry import box
+        from shapely.ops import unary_union
+        P = self.P
+        occ = self.grid.footprint_below(self.zb + P.foot_height + P.collar_height)
+        if not occ.any():
+            return
+        g = self.grid
+        rects = []
+        for jj in np.nonzero(occ.any(axis=1))[0]:
+            row = occ[jj].astype(np.int8)
+            d = np.diff(np.concatenate([[0], row, [0]]))
+            st = np.nonzero(d == 1)[0]
+            en = np.nonzero(d == -1)[0]
+            y0 = g.origin[1] + jj * g.res
+            for s, e in zip(st, en):
+                rects.append(box(g.origin[0] + s * g.res, y0, g.origin[0] + e * g.res, y0 + g.res))
+        self.tree.raft_keepout = unary_union(rects).buffer(P.xy_clearance)
