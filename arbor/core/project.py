@@ -420,6 +420,20 @@ class Project:
                                               f"Profile {self.profiles[key].label}"),
                              merge=False)
 
+    def rebind_profile(self, old_key: str, new_key: str) -> None:
+        """A profile was renamed or removed (user presets): every reference to old_key,
+        the current one and those kept by the undo history, now points to new_key. The
+        parameter values are not changed (not undoable: it follows a file operation)."""
+        for cmd in self.undo_stack._commands:
+            if isinstance(cmd, SetParamsCommand):
+                if cmd.old_profile == old_key:
+                    cmd.old_profile = new_key
+                if cmd.new_profile == old_key:
+                    cmd.new_profile = new_key
+        if self.profile_key == old_key:
+            self.profile_key = new_key
+        self._emit("params")
+
     def reset_param(self, name: str) -> None:
         self.set_param(name, getattr(self.profile_params(), name))
 

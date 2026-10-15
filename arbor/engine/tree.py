@@ -35,6 +35,26 @@ from .params import SupportParams
 from .types import Contact, NodeKind, Progress, SupportTree
 
 BIG = 1000.0  # "far from the model" distance (mm)
+# Supports are printed without supports of their own: no support surface may lean further
+# from vertical than the overhang angle. Branches keep this margin below it (the slicer
+# tests whole layers, polygonal tubes and rounding eat a little of the angle).
+PRINTABLE_MARGIN_DEG = 2.0
+# The skirt that buries the bottom of a joint sphere (build.joint_at) ends on a sphere
+# this much thinner than the branch: never tangent to the branch surface (a tangent
+# hull and tube leave zero-volume slivers in the boolean union).
+JOINT_INSET = 0.05
+
+
+def printable_angle_deg(params: SupportParams) -> float:
+    """Largest tilt from vertical (deg) any support surface may have: the overhang angle
+    minus PRINTABLE_MARGIN_DEG (the supports themselves print without support)."""
+    return float(max(0.0, params.overhang_angle_deg - PRINTABLE_MARGIN_DEG))
+
+
+def routing_angle_deg(params: SupportParams) -> float:
+    """Tilt from vertical (deg) the router gives branches, tips and braces:
+    branch_angle_deg, capped by printable_angle_deg."""
+    return float(max(0.0, min(params.branch_angle_deg, printable_angle_deg(params))))
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +353,10 @@ class _Router:
         self.mesh, self.contacts, self.P, self.tree, self.progress = mesh, contacts, params, tree, progress
         self.zb = tree.z_base
         self.dz = max(params.segment_length, 0.2)
-        self.tan = math.tan(math.radians(params.branch_angle_deg))
+        self.angle = routing_angle_deg(params)
+        self.tan = math.tan(math.radians(self.angle))
+        self.angle_print = printable_angle_deg(params)
+        self.tan_print = math.tan(math.radians(self.angle_print))
         self.r_min = params.branch_min_diameter / 2
         self.r_trunk = params.trunk_diameter / 2
         self.r_tipbase = params.tip_base_diameter / 2
@@ -349,6 +372,7 @@ class _Router:
         self._route()
         prog.update(0.9, "Braces")
         self._cleanup()
+        self._limit_widening()
         if P.braces_enabled:
             self._braces()
         if P.raft_enabled:
@@ -621,14 +645,14 @@ class _Router:
         contact 0.5 mm from a wall starts in a column where no branch fits and ends up
         landing on the model (or crossing it)."""
         P = self.P
-        u0 = tip_direction(n, P.branch_angle_deg)
+        u0 = tip_direction(n, self.angle)
         want = P.xy_clearance + self.r_min
         c0 = self._base_clearance(pos, u0)
         if c0 >= want:
             return u0
         best_u, best_s = u0, (min(c0, want) + 0.05 if c0 >= 0 else -np.inf)
-        cands = [tip_direction(n, P.branch_angle_deg, extra_tilt=True)]
-        amax = math.radians(P.branch_angle_deg)
+        cands = [tip_direction(n, self.angle, extra_tilt=True)]
+        amax = math.radians(self.angle)
         for frac in (0.5, 1.0):
             th = frac * amax
             for az in np.arange(16) * (2 * math.pi / 16):
@@ -894,10 +918,15 @@ class _Router:
         p0 = np.array([node.position[0], node.position[1], z])
         z1 = topz + P.tip_length
         off = float(np.linalg.norm(np.asarray(xy, float) - p0[:2]))
-        if off > max(z - topz - 0.5 * P.tip_length, 0.0) * self.tan + 1e-6:
-            return False
         if z - topz <= P.tip_length + 0.2:
-            return True
+            # no intermediate node: one segment from the node down to the surface
+            return off <= max(z - topz - 0.5 * P.tip_length, 0.0) * self.tan + 1e-6
+        # with an intermediate node at z1 the tilted segment is node -> (xy, z1); the
+        # tip below it is vertical. Measuring the angle down to the surface instead let
+        # short drops lean up to ~75 deg: nearly flat branches that print in the air.
+        # A landing is a last resort, so it may use the full printable angle.
+        if off > (z - z1) * self.tan_print + 1e-6:
+            return False
         p1 = np.array([xy[0], xy[1], z1])
         r0, r1 = float(node.radius), max(self.r_min, self.r_tipbase)
         n = max(2, int(math.ceil((z - z1) / (0.5 * dz))) + 1)
@@ -993,6 +1022,44 @@ class _Router:
             if cid in by_id:
                 by_id[cid].rests_on_model = False
 
+    # -- printable radii -----------------------------------------------------------
+    def _limit_widening(self) -> None:
+        """Supports print without support: a segment may not widen upwards faster than
+        the overhang angle allows. Node radii are clamped next to the model (clearance),
+        so a node can be thinner than the one above it, and the segment between them
+        then overhangs. The bottom of a node is also a sphere (junction: radius x
+        junction_radius_factor, bend: about the node radius) that build.joint_at buries in the
+        branch below with a conical skirt of half-angle <= phi - theta.
+
+        Both stay printable when r_child * f <= r_parent - JOINT_INSET + L sin(phi - theta) (theta:
+        tilt of the segment, f = build.joint_radius_factors: junction / bend sphere; sin
+        is the skirt condition, slightly stricter than the cone's tan). Thinning the
+        upper node (never the lower one) cannot hurt the clearance; it runs from the
+        feet upwards so each limit uses the final lower radius."""
+        from .build import joint_radius_factors
+        tree, P = self.tree, self.P
+        phi = math.radians(self.angle_print)
+        f_junction, f_bend = joint_radius_factors(P)
+        ch = tree.children()
+        stack = [r.id for r in tree.roots()]
+        while stack:
+            pid = stack.pop()
+            par = tree.nodes[pid]
+            for cid in ch[pid]:
+                c = tree.nodes[cid]
+                stack.append(cid)
+                if par.kind == NodeKind.FOOT or c.kind == NodeKind.TIP:
+                    continue        # cylinder of the child radius / tip cone (narrows up)
+                d = c.position - par.position
+                L = float(np.linalg.norm(d))
+                if L < 1e-9:
+                    continue
+                theta = math.atan2(float(np.linalg.norm(d[:2])), max(float(d[2]), 1e-12))
+                f = f_junction if len(ch[cid]) > 1 else f_bend
+                r_max = (par.radius - JOINT_INSET + L * math.sin(max(phi - theta, 0.0))) / f
+                if c.radius > r_max:
+                    c.radius = max(r_max, 1e-3)
+
     # -- braces -----------------------------------------------------------------------
     def _braces(self) -> None:
         P, tree, zb = self.P, self.tree, self.zb
@@ -1024,7 +1091,7 @@ class _Router:
                 if dist <= P.brace_max_length * 1.5:
                     pairs.add((min(a, int(b)), max(a, int(b))))
         rb = P.brace_diameter / 2
-        tana = math.tan(math.radians(max(P.branch_angle_deg, 1.0)))
+        tana = math.tan(math.radians(max(self.angle, 1.0)))
 
         def at(tr, z):
             pts, rad = tr
@@ -1053,7 +1120,12 @@ class _Router:
                 if z1 >= ztop:
                     continue
                 p1, _ = at(hi_t, z1)
-                if np.linalg.norm(p1[:2] - p0[:2]) > P.brace_max_length:
+                run = float(np.linalg.norm(p1[:2] - p0[:2]))
+                if run > P.brace_max_length:
+                    continue
+                if run > (z1 - z0) * self.tan_print:
+                    # the upper trunk moved away between z0 and z1: this brace would lean
+                    # beyond the printable angle (it prints without support of its own)
                     continue
                 s = np.linspace(0.15, 0.85, 8)
                 pts = p0[None, :] + s[:, None] * (p1 - p0)[None, :]

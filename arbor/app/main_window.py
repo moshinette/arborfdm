@@ -7,6 +7,7 @@ from typing import Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from arbor.core.presets import PresetError, PresetStore, is_user_key, slugify
 from arbor.core.project import PROJECT_SUFFIX, GenerationRequest, Project
 
 from . import theme
@@ -14,6 +15,7 @@ from .panels import LeftPanel, RightPanel
 from .viewport import ViewportContainer
 from .worker import TaskRunner, run_generation
 
+PRESET_FILTER = "ArborFDM preset (*.json)"
 MODEL_FILTER = "3D models (*.stl *.obj *.3mf)"
 OPEN_FILTER = f"Models and projects (*.stl *.obj *.3mf *{PROJECT_SUFFIX});;{MODEL_FILTER};;" \
               f"ArborFDM project (*{PROJECT_SUFFIX})"
@@ -71,8 +73,12 @@ def _task_orient(progress, mesh, overhang_angle_deg):
 def _task_export(progress, kind: str, path: str, model, supports, raft, params, name):
     from arbor.io import export as ex
     progress.update(0.2, "Writing file")
-    if kind == "3mf":
-        ex.export_3mf(path, model, supports, raft, params, model_name=name)
+    if kind in ("3mf", "3mf_separate"):
+        # "separate": model and supports(+raft) as two objects both resting on the plate, so
+        # Orca / Bambu Studio keep them apart (own layer height per object) without moving
+        # them (see docs/SLICERS.md)
+        ex.export_3mf(path, model, supports, raft, params, model_name=name,
+                      layout="separate" if kind == "3mf_separate" else "objects")
         progress.update(0.8, "Validating file")
         return ex.validate_export(path)
     parts = [m for m in ((model,) if kind == "stl_all" else ()) + (supports, raft)
@@ -99,6 +105,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("ArborFDM")
         self.resize(1500, 920)
 
+        # user presets: loaded from the user folder, shown after the built-in profiles
+        self.presets = PresetStore(self.project.profiles)
+        self.project.profiles = self.presets.profiles()
+        self.preset_load_errors = list(self.presets.errors)
+
         self.view = ViewportContainer()
         self.viewport = self.view.viewport
         self.left = LeftPanel(self.project)
@@ -118,6 +129,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_statusbar()
         self._connect()
         self._refresh_everything(fit=True)
+        if self.preset_load_errors:
+            self.message(self._preset_errors_text(self.preset_load_errors), warning=True)
 
     # ------------------------------------------------------------------ construction
     def _action(self, text: str, slot, icon=None, shortcut=None, tip: str = "") -> QtGui.QAction:
@@ -155,12 +168,36 @@ class MainWindow(QtWidgets.QMainWindow):
                                       "Remove all contacts and supports (undoable)")
         self.act_export_3mf = self._action("3MF: model + supports + raft", self.export_3mf, None,
                                            "Ctrl+E", "One 3MF with separate objects")
+        self.act_export_3mf_sep = self._action(
+            "3MF for Orca / Bambu: separate objects", self.export_3mf_separate, None, None,
+            "Model and supports as two objects that stay aligned: each can get its own layer "
+            "height in OrcaSlicer / Bambu Studio")
         self.act_export_stl_sup = self._action("STL: supports only", self.export_stl_supports)
         self.act_export_stl_all = self._action("STL: model + supports", self.export_stl_all)
         self.act_cancel = self._action("Cancel", self.cancel_task, "SP_BrowserStop", "Esc",
                                        "Cancel the running computation")
         self.act_fit = self._action("Fit view", lambda: self.viewport.fit_view(), None, "F")
         self.act_quit = self._action("Quit", self.close, None, K.Quit)
+        self.act_preset_save = self._action("Save preset...", self.save_preset, None, None,
+                                            "Save the current parameters as a named preset")
+        self.act_preset_rename = self._action("Rename preset...", self.rename_preset)
+        self.act_preset_delete = self._action("Delete preset", self.delete_preset)
+        self.act_preset_export = self._action("Export preset...", self.export_preset, None, None,
+                                              "Write the selected preset to a .json file to "
+                                              "share it")
+        self.act_preset_import = self._action("Import preset...", self.import_preset, None, None,
+                                              "Add a preset from a .json file")
+        self.act_preset_folder = self._action("Open presets folder", self.open_preset_folder,
+                                              None, None, str(self.presets.directory))
+        self.preset_menu = QtWidgets.QMenu("Presets", self)
+        for a in (self.act_preset_save, self.act_preset_rename, self.act_preset_delete, None,
+                  self.act_preset_export, self.act_preset_import, None, self.act_preset_folder):
+            self.preset_menu.addSeparator() if a is None else self.preset_menu.addAction(a)
+        self.left.set_preset_actions(self.act_preset_save, self.preset_menu)
+        self.right.set_preset_actions(self.act_preset_save)
+        self.act_overhang_auto = self._action(
+            "Overhang colors: automatic", lambda: self.view.set_overhang_choice(None), None, None,
+            "Overhang colours on while no support is generated, off afterwards")
 
     def _build_toolbar(self) -> None:
         tb = QtWidgets.QToolBar("Main")
@@ -183,6 +220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addSeparator()
         self.export_menu = QtWidgets.QMenu("Export", self)
         self.export_menu.addAction(self.act_export_3mf)
+        self.export_menu.addAction(self.act_export_3mf_sep)
         self.export_menu.addAction(self.act_export_stl_sup)
         self.export_menu.addAction(self.act_export_stl_all)
         self.export_button = QtWidgets.QToolButton()
@@ -210,8 +248,11 @@ class MainWindow(QtWidgets.QMainWindow):
         m = mb.addMenu("&Supports")
         for a in (self.act_generate, self.act_rebuild, self.act_clear, self.act_cancel):
             m.addAction(a)
+        m.addSeparator()
+        m.addMenu(self.preset_menu)
         m = mb.addMenu("&View")
         m.addAction(self.act_fit)
+        m.addAction(self.act_overhang_auto)
 
     def _build_statusbar(self) -> None:
         sb = self.statusBar()
@@ -284,6 +325,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_result(self) -> None:
         r = self.project.result
         self.viewport.set_supports(r.support_mesh if r else None, r.raft_mesh if r else None)
+        self.view.set_supports_present(r is not None)
         self.viewport.set_issues(r.issues if r else [])
         self.right.set_issues(r.issues if r else [], r is not None)
         self.view.refresh_clip()
@@ -321,6 +363,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_rebuild.setEnabled(has and not busy and bool(p.contacts))
         self.act_clear.setEnabled(not busy and (bool(p.contacts) or res))
         self.act_export_3mf.setEnabled(has and not busy)
+        self.act_export_3mf_sep.setEnabled(res and not busy)
         self.act_export_stl_sup.setEnabled(res and not busy)
         self.act_export_stl_all.setEnabled(has and not busy)
         self.export_button.setEnabled(has and not busy)
@@ -333,6 +376,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport.edit_enabled = has
         self._refresh_banner()
         self.viewport.set_tip_preview(p.params.tip_length, p.params.tip_base_diameter)
+        self.viewport.set_overhang_params(p.params.overhang_angle_deg, p.params.layer_height)
+        user = is_user_key(p.profile_key) and p.profile_key in self.presets.presets
+        for a in (self.act_preset_rename, self.act_preset_delete, self.act_preset_export):
+            a.setEnabled(user)
         if p.contacts_edited and res:
             self.act_rebuild.setText("Rebuild branches *")
         else:
@@ -491,6 +538,157 @@ class MainWindow(QtWidgets.QMainWindow):
         self.message(f"Saved {saved}")
         return True
 
+    # ------------------------------------------------------------------ presets
+    def _ask_text(self, caption: str, label: str, default: str = "") -> str:
+        hook = getattr(self, "text_provider", None)       # tests inject answers here
+        if hook is not None:
+            return hook(caption, label, default) or ""
+        if QtCore.QCoreApplication.instance().property("arbor_no_dialogs"):
+            return ""
+        text, ok = QtWidgets.QInputDialog.getText(self, caption, label,
+                                                  QtWidgets.QLineEdit.Normal, default)
+        return text if ok else ""
+
+    def _confirm(self, title: str, text: str) -> bool:
+        hook = getattr(self, "confirm_provider", None)
+        if hook is not None:
+            return bool(hook(title, text))
+        if QtCore.QCoreApplication.instance().property("arbor_no_dialogs"):
+            return True
+        r = QtWidgets.QMessageBox.question(self, title, text,
+                                           QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        return r == QtWidgets.QMessageBox.Yes
+
+    @staticmethod
+    def _preset_errors_text(errors) -> str:
+        names = "; ".join(msg for _, msg in errors[:3])
+        more = f" (+{len(errors) - 3} more)" if len(errors) > 3 else ""
+        return f"{len(errors)} preset file(s) ignored: {names}{more}"
+
+    def _sync_presets(self) -> None:
+        """Profiles of the project = built-in profiles + user presets of the store."""
+        self.project.profiles = self.presets.profiles()
+        self.left.rebuild_profile_combo()
+        self.left.refresh_params()
+        self.right.refresh_params()
+        self._refresh_actions()
+
+    def current_user_preset(self):
+        key = self.project.profile_key
+        return self.presets.presets.get(key) if is_user_key(key) else None
+
+    def save_preset(self) -> bool:
+        """Save the current parameters (simple and advanced) as a named user preset."""
+        p = self.project
+        cur = self.current_user_preset()
+        name = self._ask_text("Save preset", "Preset name:", cur.label if cur else "").strip()
+        if not name:
+            return False
+        existing = self.presets.find_by_label(name)
+        if existing is not None and not self._confirm(
+                "Replace preset", f"A preset named '{existing.label}' already exists. "
+                "Replace it with the current parameters?"):
+            return False
+        try:
+            preset = self.presets.save(name, p.params, self.presets.base_key(p.profile_key)
+                                       or p.profile_key, overwrite=existing is not None)
+        except PresetError as exc:
+            self.message(f"Preset not saved: {exc}", error=True)
+            self._info("Preset not saved", str(exc))
+            return False
+        self._sync_presets()
+        p.apply_profile(preset.key)          # undoable; the values are those just saved
+        self._sync_presets()
+        base = p.profiles.get(preset.inherits)
+        self.message(f"Preset '{preset.label}' saved: {len(preset.values)} value(s) differ from "
+                     f"{base.label if base else 'the defaults'} ({preset.path.name} in the presets "
+                     "folder)")
+        return True
+
+    def rename_preset(self) -> bool:
+        cur = self.current_user_preset()
+        if cur is None:
+            return False
+        name = self._ask_text("Rename preset", "New name:", cur.label).strip()
+        if not name or name == cur.label:
+            return False
+        try:
+            new = self.presets.rename(cur.key, name)
+        except PresetError as exc:
+            self.message(f"Preset not renamed: {exc}", error=True)
+            self._info("Preset not renamed", str(exc))
+            return False
+        self.project.profiles = self.presets.profiles()
+        if new.key != cur.key:
+            self.project.rebind_profile(cur.key, new.key)
+        self._sync_presets()
+        self.message(f"Preset '{cur.label}' renamed to '{new.label}'")
+        return True
+
+    def delete_preset(self) -> bool:
+        cur = self.current_user_preset()
+        if cur is None:
+            return False
+        if not self._confirm("Delete preset", f"Delete the preset '{cur.label}'? Its file is "
+                             "removed; the current parameter values are kept."):
+            return False
+        try:
+            self.presets.delete(cur.key)
+        except PresetError as exc:
+            self.message(f"Preset not deleted: {exc}", error=True)
+            return False
+        base = cur.inherits if cur.inherits in self.presets.builtin else \
+            next(iter(self.presets.builtin), "")
+        self.project.profiles = self.presets.profiles()
+        # values unchanged: they now show as differences from the built-in base profile
+        self.project.rebind_profile(cur.key, base)
+        self._sync_presets()
+        self.message(f"Preset '{cur.label}' deleted; values kept on profile "
+                     f"{self.project.profiles[base].label if base else '-'}")
+        return True
+
+    def export_preset(self) -> bool:
+        cur = self.current_user_preset()
+        if cur is None:
+            return False
+        path = self._ask_path(True, "Export preset", PRESET_FILTER, slugify(cur.label) + ".json")
+        if not path:
+            return False
+        try:
+            out = self.presets.export(cur.key, path)
+        except PresetError as exc:
+            self.message(f"Export failed: {exc}", error=True)
+            self._info("Export failed", str(exc))
+            return False
+        self.message(f"Preset '{cur.label}' exported to {out}")
+        return True
+
+    def import_preset(self) -> bool:
+        path = self._ask_path(False, "Import preset", PRESET_FILTER)
+        if not path:
+            return False
+        try:
+            preset = self.presets.import_file(path)
+        except PresetError as exc:
+            self.message(f"Import failed: {exc}", error=True)
+            self._info("Cannot import preset", str(exc))
+            return False
+        self._sync_presets()
+        self.project.apply_profile(preset.key)       # undoable
+        self.message(f"Preset '{preset.label}' imported from {Path(path).name} and selected")
+        return True
+
+    def open_preset_folder(self) -> None:
+        d = self.presets.directory
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.message(f"Cannot create {d}: {exc}", error=True)
+            return
+        if not QtCore.QCoreApplication.instance().property("arbor_no_dialogs"):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(d)))
+        self.message(f"Presets folder: {d}")
+
     # ------------------------------------------------------------------ edit slots
     def undo(self) -> None:
         if not self.runner.is_running():
@@ -611,6 +809,10 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ export
     def export_3mf(self) -> None:
         self._export("3mf", "Export 3MF", "3MF (*.3mf)", ".3mf")
+
+    def export_3mf_separate(self) -> None:
+        self._export("3mf_separate", "Export 3MF (separate objects)", "3MF (*.3mf)",
+                     "_separate.3mf")
 
     def export_stl_supports(self) -> None:
         self._export("stl_supports", "Export supports STL", "STL (*.stl)", "_supports.stl")

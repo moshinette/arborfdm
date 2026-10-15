@@ -7,6 +7,7 @@ independent group so the result is watertight by construction.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Optional
 
 import manifold3d as mf
@@ -14,6 +15,7 @@ import numpy as np
 import trimesh
 
 from .params import SupportParams
+from .tree import JOINT_INSET, printable_angle_deg
 from .types import NodeKind, Progress, SupportTree
 
 _EMPTY = trimesh.Trimesh(np.zeros((0, 3)), np.zeros((0, 3), np.int64), process=False)
@@ -47,7 +49,12 @@ def cone_between(p0, p1, r0: float, r1: float, segs: int) -> Optional[mf.Manifol
 
 
 def sphere_at(p, r: float, segs: int) -> mf.Manifold:
-    return mf.Manifold.sphere(float(r), segs).translate(tuple(float(v) for v in p))
+    # turned by half a facet about Z: a tube ring of the same radius around the same
+    # centre (bend breaks: the next chain starts with the node radius) otherwise shares
+    # vertices exactly with the sphere's equator and the union leaves zero-volume
+    # slivers. Half a facet keeps the sphere mirror symmetric (symmetric models).
+    return mf.Manifold.sphere(float(r), segs).rotate((0.0, 0.0, 180.0 / segs)) \
+        .translate(tuple(float(v) for v in p))
 
 
 def manifold_to_trimesh(m: mf.Manifold) -> trimesh.Trimesh:
@@ -69,8 +76,77 @@ def trimesh_to_manifold(t: trimesh.Trimesh) -> mf.Manifold:
     return mf.Manifold(mf.Mesh(vert_properties=v, tri_verts=f))
 
 
+def joint_at(p, R: float, below, r_below_at, phi_deg: float, segs: int) -> mf.Manifold:
+    """Sphere of radius R at p (junction, ball tip), with its underside made printable.
+
+    A sphere wider than the branch under it hangs out beyond the overhang angle (its
+    bottom is a flat dome). The sphere is merged (convex hull) with a smaller sphere
+    placed down the branch axis, inside the branch, far enough that the conical skirt
+    between them leans at most phi from vertical: the bottom of the joint is then
+    buried in the branch instead of floating around it.
+
+    below: the node under p (parent); r_below_at(s): radius of the branch at distance
+    s from p along it."""
+    p = np.asarray(p, float)
+    ball = sphere_at(p, R, segs)
+    if below is None:
+        return ball
+    v = np.asarray(below, float) - p
+    L = float(np.linalg.norm(v))
+    if L < 1e-6:
+        return ball
+    u = v / L
+    theta = math.atan2(float(np.linalg.norm(u[:2])), max(-float(u[2]), 1e-12))  # tilt of the branch
+    room = math.radians(phi_deg) - theta
+    r0, rL = r_below_at(0.0), r_below_at(L)
+    k = (rL - r0) / L                      # < 0: the branch gets thinner downwards
+    if R <= r0 + 1e-6 and k >= -1e-9:
+        return ball                        # the branch is at least as wide: covered
+    sin_room = math.sin(max(room, 0.0))
+    # skirt end: a sphere JOINT_INSET thinner than the branch at distance s down its
+    # axis; smallest s with (R - r(s) + inset) / s <= sin(room) (skirt half-angle). A
+    # branch thinning downwards is followed to its lower end.
+    if k < 0:
+        s_ = L
+    else:
+        s_ = (R - r0 + JOINT_INSET) / (sin_room + k) if sin_room + k > 1e-6 else math.inf
+    if s_ >= L:
+        # the skirt reaches the node below: keep the sphere small enough for the skirt
+        # to stay printable (large junction_radius_factor, steep or thinning branch;
+        # tree._limit_widening keeps node radii within this bound)
+        s_ = L
+        R_ok = rL - JOINT_INSET + L * sin_room
+        if R > R_ok:
+            R = max(R_ok, 1e-3)
+            ball = sphere_at(p, R, segs)
+    r_s = max(min(r_below_at(s_) - JOINT_INSET, R), 1e-3)
+    low = sphere_at(p + u * s_, r_s, segs)
+    return mf.Manifold.batch_hull([ball, low])
+
+
 def _sphere_segs(segs: int) -> int:
     return max(8, int(math.ceil(segs / 4.0)) * 4)
+
+
+@lru_cache(maxsize=None)
+def _sphere_inradius(segs: int) -> float:
+    """Distance from the centre to the nearest facet of Manifold.sphere(1, segs)."""
+    m = mf.Manifold.sphere(1.0, segs).to_mesh()
+    v = np.asarray(m.vert_properties, float)[:, :3]
+    f = np.asarray(m.tri_verts, np.int64)
+    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    n = np.cross(b - a, c - a)
+    n /= np.linalg.norm(n, axis=1)[:, None]
+    return float(np.abs((n * a).sum(axis=1)).min())
+
+
+def joint_radius_factors(params: SupportParams) -> tuple[float, float]:
+    """(junction, bend) sphere radius / node radius. A chain starts at a junction or a
+    bend with a ring of the node radius around the node; the faceted sphere must
+    contain it strictly (a ring vertex on a facet or a vertex leaves zero-volume
+    slivers in the union), hence at least 1 / inradius of the faceted sphere."""
+    cover = 1.01 / _sphere_inradius(_sphere_segs(int(params.circle_segments)))
+    return max(float(params.junction_radius_factor), cover), cover
 
 
 def tube(points: np.ndarray, radii: np.ndarray, segs: int) -> Optional[mf.Manifold]:
@@ -179,6 +255,8 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
     P = params
     segs = int(P.circle_segments)
     ssegs = _sphere_segs(segs)
+    phi = printable_angle_deg(P)
+    f_junction, f_bend = joint_radius_factors(P)
     nodes = tree.nodes
     ch = tree.children()
     out: list[mf.Manifold] = []
@@ -193,6 +271,15 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
         r_top = n.radius * (0.6 if (ball and n.kind == NodeKind.TIP) else 1.0)
         r_low = n.radius if par.kind == NodeKind.FOOT else par.radius
         return r_low, r_top
+
+    def joint(n, R: float):
+        """Sphere of radius R at node n whose underside is buried in the branch below."""
+        if n.parent is None:
+            return sphere_at(n.position, R, ssegs)
+        rl, rt = seg_radii(n.id)
+        L = float(np.linalg.norm(nodes[n.parent].position - n.position))
+        return joint_at(n.position, R, nodes[n.parent].position,
+                        lambda s_: rt + (rl - rt) * min(s_ / max(L, 1e-9), 1.0), phi, ssegs)
 
     if tubes:
         chains = _chains(tree, ch)
@@ -217,7 +304,7 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
                         out.append(s_)
             top = nodes[chain[-1]]
             if len(ch[top.id]) == 1 and top.kind in (NodeKind.BRANCH, NodeKind.TRUNK):
-                out.append(sphere_at(top.position, top.radius, ssegs))   # bend break
+                out.append(joint(top, top.radius * f_bend))   # bend break
             if len(ch[top.id]) > 1 and top.kind in (NodeKind.BRANCH, NodeKind.TRUNK):
                 # the chain stopped at a junction because of a sharp bend: the junction
                 # sphere is added below; nothing else to do
@@ -231,14 +318,14 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
             if s_ is not None:
                 out.append(s_)
             if len(ch[n.id]) == 1 and n.kind in (NodeKind.BRANCH, NodeKind.TRUNK):
-                out.append(sphere_at(n.position, n.radius, ssegs))
+                out.append(joint(n, n.radius * f_bend))
 
     for n in nodes.values():
         k = ch[n.id]
         if ball and n.kind == NodeKind.TIP:
-            out.append(sphere_at(n.position, n.radius, ssegs))
+            out.append(joint(n, n.radius))
         if n.kind in (NodeKind.BRANCH, NodeKind.TRUNK, NodeKind.MODEL_FOOT) and len(k) > 1:
-            out.append(sphere_at(n.position, n.radius * P.junction_radius_factor, ssegs))
+            out.append(joint(n, n.radius * f_junction))
         elif n.kind == NodeKind.FOOT:
             fr = max(float(foot_radius.get(n.id, P.foot_diameter / 2)), n.radius)
             base = np.array([n.position[0], n.position[1], z_base])

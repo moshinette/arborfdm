@@ -56,8 +56,10 @@ def _stand_in(progress, mesh, params, manual_contacts=None, analysis=None, conta
 
 
 @pytest.fixture
-def window(app, monkeypatch):
+def window(app, monkeypatch, tmp_path):
     from arbor.app import main_window as mw
+    # user presets go to a private folder (never the real user folder)
+    monkeypatch.setenv("ARBOR_USER_PRESET_DIR", str(tmp_path / "user_presets"))
     if not _engine_ok():
         monkeypatch.setattr(mw, "run_generation", _stand_in)
     w = mw.MainWindow()
@@ -113,10 +115,10 @@ def test_every_toolbar_action_has_a_real_slot(window):
             assert a.receivers("2triggered(bool)") >= 1 or a.receivers("2triggered()") >= 1, a.text()
     for expected in ("New", "Open", "Save", "Undo", "Redo", "Generate supports"):
         assert expected in texts
-    # the export button carries a menu of three connected actions
+    # the export button carries a menu of four connected actions (3MF, 3MF separate, 2 STL)
     menu = window.export_button.menu()
     exports = [a for a in menu.actions() if not a.isSeparator()]
-    assert len(exports) == 3
+    assert len(exports) == 4
     for a in exports:
         assert a.receivers("2triggered(bool)") >= 1 or a.receivers("2triggered()") >= 1
 
@@ -500,3 +502,232 @@ def test_cut_is_reset_when_another_model_is_loaded(app, window, stl_path):
     window.view.clip_slider.setValue(300)
     window.new_project()
     assert window.viewport.clip_z is None
+
+
+# ---------------------------------------------------------------------------
+# Overhang colours (display only)
+# ---------------------------------------------------------------------------
+def test_overhang_bands_follow_threshold():
+    from arbor.app import overhang as oh
+    # angles from vertical: wall 0, 40, 50, 60, 80, ceiling 90, upward face -90
+    ang = np.array([0, 40, 50, 60, 80, 90, -90], float)
+    normals = np.c_[np.cos(np.radians(ang)), np.zeros(len(ang)), -np.sin(np.radians(ang))]
+    a = oh.face_angles(normals)
+    assert np.allclose(a, ang, atol=1e-3)
+    assert oh.classify(a, 55).tolist() == [0, 0, 1, 2, 3, 3, 0]
+    assert oh.classify(a, 45).tolist() == [0, 1, 2, 2, 3, 3, 0]
+    assert oh.band_edges(55) == (45.0, 55.0, 72.5)
+    labels = [b.label for b in oh.bands(55)]
+    assert "45 - 55" in labels[1] and "55 - 72" in labels[2] and "72 - 90" in labels[3]
+    # faces resting on the plate are never coloured
+    top = np.array([5, 5, 5, 5, 0.05, 0.05, 5], float)
+    assert oh.classify(a, 55, top, 0.12).tolist() == [0, 0, 1, 2, 0, 0, 0]
+    rgba = oh.vertex_colors(oh.classify(a, 55), (0.8, 0.78, 0.74, 1.0))
+    assert rgba.shape == (3 * len(a), 4) and rgba.dtype == np.uint8
+
+
+def test_overhang_colours_in_window(app, window, stl_path):
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    vp, view, p = window.viewport, window.view, window.project
+    verts_before = p.mesh.vertices.copy()
+    # automatic: on while there is no support
+    assert view.overhang_button.isChecked() and vp.overhang_enabled
+    assert vp.model_item.has_custom_colors()
+    assert vp.overhang_legend.isVisibleTo(window)
+    cls = vp.overhang_classes
+    assert cls is not None and len(cls) == len(p.mesh.faces)
+    n = np.asarray(p.mesh.face_normals)
+    top = np.asarray(p.mesh.triangles)[:, :, 2].max(axis=1)
+    ceiling = (n[:, 2] < -0.99) & (top > 1)            # underside of the arm
+    plate = (n[:, 2] < -0.99) & (top < 0.1)            # bottom of the post on the plate
+    assert (cls[ceiling] == 3).all() and (cls[plate] == 0).all()
+    assert (cls[np.abs(n[:, 2]) < 1e-6] == 0).all()   # walls
+    assert "55" in vp.overhang_legend.title.text()
+    # threshold change: recoloured, legend updated, geometry untouched
+    window.right.fields["overhang_angle_deg"].widget.setValue(80.0)
+    assert vp.overhang_threshold == 80.0 and "80" in vp.overhang_legend.title.text()
+    assert "85 - 90" in vp.overhang_legend.range_labels["severe"].text()
+    assert (vp.overhang_classes[ceiling] == 3).all()
+    np.testing.assert_array_equal(p.mesh.vertices, verts_before)
+    # rotating the model recomputes the colours on the new world mesh
+    window.left.rot_spins[0].setValue(180.0)
+    assert vp._angle_cache[0] is p.mesh
+    assert len(vp.overhang_classes) == len(p.mesh.faces)
+    n = np.asarray(p.mesh.face_normals)
+    top = np.asarray(p.mesh.triangles)[:, :, 2].max(axis=1)
+    assert (vp.overhang_classes[(n[:, 2] < -0.99) & (top < 0.1)] == 0).all()
+    window.undo()
+    # user choice: off, kept; View > automatic restores the automatic mode
+    view.overhang_button.click()
+    assert not vp.overhang_enabled and not vp.model_item.has_custom_colors()
+    assert not vp.overhang_legend.isVisibleTo(window)
+    view.set_supports_present(False)
+    assert not vp.overhang_enabled
+    window.act_overhang_auto.trigger()
+    assert vp.overhang_enabled
+    view.set_supports_present(True)            # automatic: off once supports exist
+    assert not vp.overhang_enabled and not view.overhang_button.isChecked()
+    view.overhang_button.click()               # forced on with supports
+    assert vp.overhang_enabled
+    # supports-only view: no model, no colours
+    view.mode_buttons["supports"].click()
+    assert vp.overhang_classes is None and not vp.overhang_legend.isVisibleTo(window)
+    view.mode_buttons["both"].click()
+    assert vp.overhang_classes is not None
+
+
+def test_overhang_mode_keeps_manual_picking(app):
+    from arbor.app.viewport import Viewport
+    vp = Viewport()
+    vp.resize(800, 600)
+    m = trimesh.creation.box((10, 10, 10))
+    m.apply_translation([0, 0, 5])
+    vp.set_model(m, fit=True)
+    vp.set_overhang_display(True)
+    assert vp.model_item.has_custom_colors()
+    added = []
+    vp.contactAddRequested.connect(lambda pos, nrm: added.append(pos))
+    vp.setCameraPosition(elevation=40, azimuth=-60)
+    px, _ = vp.project_points(np.array([[1.0, -2.0, 10.0]]))
+    assert vp.handle_click(*px[0], QtCore.Qt.MouseButton.LeftButton) == "add"
+    assert np.allclose(added[0], [1.0, -2.0, 10.0], atol=1e-3)
+    # clipped display: colours follow the shown (cut) mesh
+    vp.clip_z = 5.0
+    vp._rebuild_geometry()
+    assert len(vp.overhang_classes) == len(vp._model_shown.faces)
+
+
+def test_overhang_recolour_is_fast_on_1m_triangles(app):
+    from arbor.app.viewport import Viewport
+    mesh = trimesh.creation.icosphere(subdivisions=8, radius=20)      # 1 310 720 faces
+    mesh.apply_translation([0, 0, 20])
+    vp = Viewport()
+    vp.resize(400, 300)
+    vp.set_model(mesh)
+    vp.set_overhang_display(True)                  # first pass: angles computed once
+    first = dict(vp.overhang_timings)
+    t0 = time.perf_counter()
+    for k in range(5):
+        vp.set_overhang_params(40.0 + 5 * k, 0.12)  # threshold change: classify + colours
+    per = (time.perf_counter() - t0) / 5
+    assert first["faces"] == len(mesh.faces) > 1_000_000
+    assert per < 0.5, per
+    assert first["angles_s"] < 1.0, first
+
+
+# ---------------------------------------------------------------------------
+# User presets
+# ---------------------------------------------------------------------------
+def test_save_rename_export_delete_preset(app, window, stl_path, tmp_path):
+    import json
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    p, combo = window.project, window.left.profile_combo
+    assert combo.count() == 6                      # no user preset yet: no separator
+    assert not window.act_preset_delete.isEnabled()
+    window.right.fields["overhang_angle_deg"].widget.setValue(48.0)
+    window.left.fields["raft_enabled"].widget.setChecked(True)
+    window.text_provider = lambda cap, label, default: "My minis"
+    assert window.save_preset()
+    key = "user:my_minis"
+    assert p.profile_key == key and p.changed_from_profile() == {}
+    assert combo.currentData() == key and combo.currentText().endswith("My minis")
+    assert combo.count() == 6 + 3                  # separator, header, preset
+    header = combo.model().item(7)
+    assert header.text() == "My presets" and not (header.flags() & QtCore.Qt.ItemIsEnabled)
+    data = json.loads((tmp_path / "user_presets" / "my_minis.json").read_text("utf-8"))
+    assert data["inherits"] == "nozzle_04_normal"
+    assert data["values"] == {"overhang_angle_deg": 48.0, "raft_enabled": True}
+    assert window.act_preset_delete.isEnabled() and "Preset:" in window.right.profile_label.text()
+    # rename keeps the selection and the values
+    window.text_provider = lambda cap, label, default: "Minis 32mm"
+    assert window.rename_preset()
+    assert p.profile_key == "user:minis_32mm" and combo.currentText().endswith("Minis 32mm")
+    # export
+    out = tmp_path / "share.json"
+    window.path_provider = lambda save, cap, filt, default: str(out)
+    assert window.export_preset() and json.loads(out.read_text("utf-8"))["label"] == "Minis 32mm"
+    # undo of the profile switch goes back to the built-in profile with the same values
+    window.undo()
+    assert p.profile_key == "nozzle_04_normal" and p.params.overhang_angle_deg == 48.0
+    window.redo()
+    assert p.profile_key == "user:minis_32mm"
+    # delete: values kept, shown as changes against the built-in base
+    window.confirm_provider = lambda title, text: True
+    assert window.delete_preset()
+    assert p.profile_key == "nozzle_04_normal" and combo.count() == 6
+    assert set(p.changed_from_profile()) == {"overhang_angle_deg", "raft_enabled"}
+    window.undo()
+    window.undo()
+    assert p.profile_key in p.profiles            # history never points to a deleted preset
+    # import the exported file back
+    window.path_provider = lambda save, cap, filt, default: str(out)
+    assert window.import_preset()
+    assert p.profile_key == "user:minis_32mm" and p.params.raft_enabled
+
+
+def test_import_invalid_preset_reports_without_crash(app, window, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"label": "x", "values": {"overhang_angle_deg": 200}}', encoding="utf-8")
+    window.path_provider = lambda save, cap, filt, default: str(bad)
+    before = dict(window.project.profiles)
+    assert not window.import_preset()
+    assert "overhang_angle_deg" in window.status_msg.text()
+    assert window.last_info[0] == "Cannot import preset"
+    assert set(window.project.profiles) == set(before)
+
+
+def test_invalid_preset_files_are_reported_at_startup(app, monkeypatch, tmp_path):
+    from arbor.app import main_window as mw
+    d = tmp_path / "presets"
+    d.mkdir()
+    (d / "ok.json").write_text('{"label": "Ok", "inherits": "nozzle_02_light", '
+                               '"values": {"walls": 2}}', encoding="utf-8")
+    (d / "broken.json").write_text("{oops", encoding="utf-8")
+    monkeypatch.setenv("ARBOR_USER_PRESET_DIR", str(d))
+    w = mw.MainWindow()
+    try:
+        assert "user:ok" in w.project.profiles
+        assert w.left.profile_combo.findData("user:ok") > 0
+        assert "1 preset file(s) ignored" in w.status_msg.text()
+        assert "broken.json" in w.status_msg.text()
+    finally:
+        w.close()
+
+
+def test_project_with_user_preset_reopens(app, window, stl_path, tmp_path):
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    window.right.fields["walls"].widget.setValue(5)
+    window.text_provider = lambda *a: "Five walls"
+    assert window.save_preset()
+    target = tmp_path / "proj.arbor"
+    window.path_provider = lambda *a: str(target)
+    assert window.save_project_as()
+    window.new_project()
+    assert window.project.profile_key == "nozzle_04_normal"
+    window.open_path(str(target))
+    wait_for(app, window)
+    assert window.project.profile_key == "user:five_walls"
+    assert window.project.params.walls == 5
+    assert window.left.profile_combo.currentText().endswith("Five walls")
+
+
+def test_export_3mf_separate_objects(app, window, tmp_path):
+    """Reddit request: model and supports as separate objects (own layer heights in Orca)."""
+    import zipfile
+    window.open_path(os.path.join(EXAMPLES, "shelf.stl"))
+    wait_for(app, window)
+    assert not window.act_export_3mf_sep.isEnabled()          # needs generated supports
+    window.generate_full()
+    wait_for(app, window, timeout=300)
+    assert window.act_export_3mf_sep.isEnabled()
+    out = tmp_path / "sep.3mf"
+    window.path_provider = lambda save, cap, filt, default: str(out)
+    window.export_3mf_separate()
+    wait_for(app, window)
+    assert out.exists(), window.last_error
+    with zipfile.ZipFile(out) as z:
+        xml = z.read("3D/3dmodel.model").decode()
+    assert xml.count("<item ") == 2

@@ -195,6 +195,35 @@ def test_generate_components_layout(tmp_path):
     assert xml.count("<item ") == 1 and "<components>" in xml
 
 
+def test_generate_separate_layout_with_layer_heights(tmp_path, capsys):
+    out, js = tmp_path / "sep.3mf", tmp_path / "r.json"
+    rc = main(["generate", _ex("shelf"), "-o", str(out), "--set", "raft_enabled=true",
+               "--layout", "separate", "--model-layer-height", "0.12",
+               "--support-layer-height", "0.24", "--json", str(js)])
+    assert rc == EXIT_OK
+    assert "Separate objects, each resting on the plate" in capsys.readouterr().out
+    assert validate_export(out) == []
+    rep = json.loads(js.read_text())
+    assert rep["export"]["layout"] == "separate"
+    assert rep["export"]["layer_heights"] == {"model": 0.12, "supports": 0.24}
+    with zipfile.ZipFile(out) as z:
+        assert "Metadata/model_settings.config" in z.namelist()
+        cfg = z.read("Metadata/model_settings.config").decode()
+    assert 'key="layer_height" value="0.12"' in cfg and 'key="layer_height" value="0.24"' in cfg
+    for part in read_3mf(out).parts:
+        assert part.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6), part.name
+
+
+def test_layer_height_options_need_separate_layout(tmp_path):
+    out = tmp_path / "x.3mf"
+    assert main(["generate", _ex("shelf"), "-o", str(out), "--model-layer-height", "0.1"]) == EXIT_USAGE
+    assert main(["generate", _ex("shelf"), "-o", str(tmp_path / "x.stl"), "--layout", "separate",
+                 "--support-layer-height", "0.2"]) == EXIT_USAGE
+    assert main(["generate", _ex("shelf"), "-o", str(out), "--layout", "separate",
+                 "--support-layer-height", "-1"]) == EXIT_USAGE
+    assert not out.exists()
+
+
 def test_bad_output_extension(tmp_path):
     assert main(["generate", _ex("shelf"), "-o", str(tmp_path / "x.obj")]) == EXIT_USAGE
 

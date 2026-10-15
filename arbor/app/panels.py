@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from arbor.core.presets import is_user_key
 from arbor.core.project import Project
 from arbor.engine.params import SupportParams
 
@@ -175,13 +176,22 @@ def _scroll(inner: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
 
 
 def ordered_profiles(project: Project) -> list[str]:
+    """Built-in profiles, by nozzle then light / normal / dense."""
     order = {"light": 0, "normal": 1, "dense": 2}
 
     def key(k: str):
         p = project.profiles[k]
         tail = k.rsplit("_", 1)[-1]
         return (p.params.nozzle_diameter, order.get(tail, 9), k)
-    return sorted(project.profiles, key=key)
+    return sorted((k for k in project.profiles if not is_user_key(k)), key=key)
+
+
+def ordered_user_presets(project: Project) -> list[str]:
+    return sorted((k for k in project.profiles if is_user_key(k)),
+                  key=lambda k: project.profiles[k].label.lower())
+
+
+USER_PRESET_COLOR = "#8fd0ff"
 
 
 # ---------------------------------------------------------------------------
@@ -309,13 +319,25 @@ class LeftPanel(QtWidgets.QWidget):
         g, lay = _group("Supports")
         f = _form()
         self.profile_combo = QtWidgets.QComboBox()
-        for key in ordered_profiles(project):
-            self.profile_combo.addItem(project.profiles[key].label, key)
-            self.profile_combo.setItemData(self.profile_combo.count() - 1,
-                                           project.profiles[key].description,
-                                           QtCore.Qt.ToolTipRole)
+        self.profile_combo.setMaxVisibleItems(20)
+        self.rebuild_profile_combo()
         self.profile_combo.activated.connect(self._on_profile)
         f.addRow(QtWidgets.QLabel("Profile", objectName="dim"), self.profile_combo)
+        # user presets: the buttons get their actions from the main window
+        prow = QtWidgets.QHBoxLayout()
+        prow.setSpacing(4)
+        self.save_preset_button = QtWidgets.QToolButton()
+        self.save_preset_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.preset_menu_button = QtWidgets.QToolButton()
+        self.preset_menu_button.setText("Presets")
+        self.preset_menu_button.setToolTip("Rename, delete, export or import user presets")
+        self.preset_menu_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        for b in (self.save_preset_button, self.preset_menu_button):
+            b.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            prow.addWidget(b)
+        self.save_preset_button.hide()
+        self.preset_menu_button.hide()
+        f.addRow(QtWidgets.QLabel("", objectName="dim"), prow)
         self.fields: dict[str, ParamField] = {}
         defaults = SupportParams().to_dict()
         checks = QtWidgets.QGridLayout()
@@ -344,6 +366,43 @@ class LeftPanel(QtWidgets.QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(_scroll(inner))
         self.refresh_all()
+
+    def set_preset_actions(self, save: QtGui.QAction, menu: QtWidgets.QMenu) -> None:
+        self.save_preset_button.setDefaultAction(save)
+        self.preset_menu_button.setMenu(menu)
+        self.save_preset_button.show()
+        self.preset_menu_button.show()
+
+    def rebuild_profile_combo(self) -> None:
+        """Built-in profiles, then (separated) the user presets."""
+        p = self.project
+        c = self.profile_combo
+        c.blockSignals(True)
+        c.clear()
+        for key in ordered_profiles(p):
+            c.addItem(p.profiles[key].label, key)
+            c.setItemData(c.count() - 1, p.profiles[key].description, QtCore.Qt.ToolTipRole)
+        users = ordered_user_presets(p)
+        if users:
+            c.insertSeparator(c.count())
+            c.addItem("My presets")
+            header = c.model().item(c.count() - 1)
+            header.setFlags(QtCore.Qt.NoItemFlags)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            header.setForeground(QtGui.QBrush(QtGui.QColor(theme.TEXT_DIM)))
+            for key in users:
+                prof = p.profiles[key]
+                c.addItem("\u2605 " + prof.label, key)
+                i = c.count() - 1
+                c.setItemData(i, QtGui.QBrush(QtGui.QColor(USER_PRESET_COLOR)),
+                              QtCore.Qt.ForegroundRole)
+                c.setItemData(i, f"User preset: {prof.label}"
+                              + (f"\n{prof.description}" if prof.description else ""),
+                              QtCore.Qt.ToolTipRole)
+        c.setCurrentIndex(c.findData(p.profile_key))
+        c.blockSignals(False)
 
     # -- refresh ----------------------------------------------------------------------
     def refresh_all(self) -> None:
@@ -580,7 +639,11 @@ class RightPanel(QtWidgets.QWidget):
         self.reset_all_button = QtWidgets.QPushButton("Reset all")
         self.reset_all_button.setToolTip("Reset every value to the profile")
         self.reset_all_button.clicked.connect(self._reset_all)
+        self.save_preset_button = QtWidgets.QToolButton()
+        self.save_preset_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.save_preset_button.hide()
         top.addWidget(self.profile_label, 1)
+        top.addWidget(self.save_preset_button)
         top.addWidget(self.reset_all_button)
         root.addLayout(top)
         self.fields: dict[str, ParamField] = {}
@@ -643,13 +706,18 @@ class RightPanel(QtWidgets.QWidget):
         changed = p.changed_from_profile()
         base = p.profile_params()
         prof = p.profiles.get(p.profile_key)
-        self.profile_label.setText(f"Profile: {prof.label if prof else '-'}"
+        kind = "Preset" if is_user_key(p.profile_key) else "Profile"
+        self.profile_label.setText(f"{kind}: {prof.label if prof else '-'}"
                                    + (f"   <span style='color:{theme.AMBER}'>"
                                       f"{len(changed)} changed</span>" if changed else ""))
         self.reset_all_button.setEnabled(bool(changed))
         for name, pf in self.fields.items():
             pf.set_value(getattr(p.params, name), name in changed, getattr(base, name))
             self.reset_buttons[name].setEnabled(name in changed)
+
+    def set_preset_actions(self, save: QtGui.QAction) -> None:
+        self.save_preset_button.setDefaultAction(save)
+        self.save_preset_button.show()
 
     def _reset_all(self) -> None:
         self.project.set_params(self.project.profile_params(), text="Reset parameters")

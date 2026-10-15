@@ -2,6 +2,8 @@
 
     arborfdm-cli generate in.stl -o out.3mf [--profile nozzle_04_normal] [--set key=value ...]
                  [--stl-supports s.stl] [--repair] [--auto-orient] [--json report.json]
+                 [--layout objects|components|separate]
+                 [--model-layer-height MM] [--support-layer-height MM]
     arborfdm-cli check in.stl [--json report.json]
     arborfdm-cli profiles [--json]
 
@@ -237,6 +239,14 @@ def cmd_generate(args, out: _Out) -> int:
     out_path = Path(args.output)
     if out_path.suffix.lower() not in (".3mf", ".stl"):
         raise CliError("output must end with .3mf or .stl")
+    layer_heights = {k: v for k, v in (("model", args.model_layer_height),
+                                       ("supports", args.support_layer_height)) if v is not None}
+    if layer_heights and (args.layout != "separate" or out_path.suffix.lower() != ".3mf"):
+        raise CliError("--model-layer-height / --support-layer-height need a .3mf output "
+                       "and --layout separate")
+    for k, v in layer_heights.items():
+        if not 0.0 < v <= 2.0:
+            raise CliError(f"--{'support' if k == 'supports' else 'model'}-layer-height must be in (0, 2] mm")
     profiles = _load_profiles()
     if args.profile not in profiles:
         raise CliError(f"unknown profile {args.profile!r}; available: {', '.join(profiles)}")
@@ -330,11 +340,12 @@ def cmd_generate(args, out: _Out) -> int:
     files: dict[str, str] = {}
     if out_path.suffix.lower() == ".3mf":
         er = export_3mf(out_path, mesh, sup if has_sup else None, res.raft_mesh, params, model_name=name,
-                        layout=args.layout)
+                        layout=args.layout, layer_heights=layer_heights or None)
         notes += er.notes
         problems = validate_export(out_path)
         report["export"] = {"path": out_path, "objects": er.objects, "layout": er.layout,
-                            "offset_mm": er.offset, "triangles": er.n_triangles}
+                            "offset_mm": er.offset, "triangles": er.n_triangles,
+                            "layer_heights": layer_heights}
     else:
         parts = [m for m in (mesh, sup if has_sup else None, res.raft_mesh)
                  if m is not None and len(m.faces)]
@@ -363,9 +374,14 @@ def cmd_generate(args, out: _Out) -> int:
     if not has_sup:
         out.warn("no support was generated (nothing to support?)")
     out.info("Reminder: disable the slicer's own supports when printing this file.")
-    if out_path.suffix.lower() == ".3mf":
+    if out_path.suffix.lower() == ".3mf" and args.layout == "separate":
+        out.info("Separate objects, each resting on the plate: OrcaSlicer / Bambu Studio keep them "
+                 "as separate objects; PrusaSlicer may ask 'Multi-part object detected', both "
+                 "answers keep the alignment (see docs/SLICERS.md).")
+    elif out_path.suffix.lower() == ".3mf":
         out.info("PrusaSlicer / OrcaSlicer / Bambu Studio: answer 'Yes' to 'Multi-part object "
-                 "detected' to keep the model on its supports (see docs/SLICERS.md).")
+                 "detected' to keep the model on its supports, or export with --layout separate "
+                 "(see docs/SLICERS.md).")
 
     code = EXIT_PROBLEMS if (res.errors or problems) else EXIT_OK
     report["errors"] = len(res.errors) + len(problems)
@@ -413,8 +429,16 @@ def make_parser() -> argparse.ArgumentParser:
                    help="repair a copy of the mesh if it is not a valid closed solid")
     g.add_argument("--auto-orient", action="store_true",
                    help="apply the best automatic orientation before generating")
-    g.add_argument("--layout", choices=("objects", "components"), default="objects",
-                   help="3MF layout: one build item per part (default) or one assembly")
+    g.add_argument("--layout", choices=("objects", "components", "separate"), default="objects",
+                   help="3MF layout: one build item per part (default), one assembly "
+                        "(components), or separate objects that each rest on the plate, raft "
+                        "merged with the supports (separate: for OrcaSlicer / Bambu Studio)")
+    g.add_argument("--model-layer-height", type=float, metavar="MM",
+                   help="with --layout separate: layer height of the model object, written for "
+                        "OrcaSlicer / Bambu Studio (Metadata/model_settings.config)")
+    g.add_argument("--support-layer-height", type=float, metavar="MM",
+                   help="with --layout separate: layer height of the supports (+ raft) object "
+                        "for OrcaSlicer / Bambu Studio")
     g.add_argument("--json", metavar="FILE", help="write a JSON report")
     g.set_defaults(func=cmd_generate)
 

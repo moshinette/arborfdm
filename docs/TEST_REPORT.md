@@ -6,7 +6,7 @@ Date : 2026-10-15. Machine : conteneur Linux, 2 cœurs, 7,8 Gio, Python 3.13.16,
 
 Commande : `QT_QPA_PLATFORM=offscreen python3 -m pytest -q -p no:cacheprovider`
 
-Résultat : **398 passed, 0 failed, 0 xfail, 3 warnings, 243 s.**
+Résultat : **469 passed, 1 skipped, 0 failed, 352 s** (2026-10-15, après les ajouts issus des retours Reddit ; le test sauté vérifie un dossier en lecture seule, sans effet en root).
 
 Les 3 avertissements sont des `RuntimeWarning: invalid value encountered in divide` dans `trimesh/triangles.py` (normales de triangles d'aire nulle), sans effet sur les assertions.
 

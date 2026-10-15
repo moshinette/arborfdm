@@ -24,6 +24,8 @@ Source : [3MF Core Specification](https://github.com/3MFConsortium/spec_core/blo
 
 Remarque : le comportement Orca/Bambu est lu sur un miroir d'une version de l'importeur ; le code courant peut différer.
 
+**Mise à jour (OrcaSlicer v2.4.2, code relu et CLI essayée, cf. [SLICERS.md](../SLICERS.md) § « Cause trouvée »)** : Orca lit les 3MF non Prusa avec `bbs_3mf.cpp`, pas `3mf.cpp`. Un objet fait de `<components>` y devient **un seul objet à plusieurs pièces** (pas des instances séparées). La question multi-pièces dépend des **z min différents** des objets, pas du chevauchement des boîtes. Un objet séparé qui ne touche pas le plateau est soit descendu (`ensure_on_bed`), soit, avec `auto_drop="0"` sur l'item, refusé au découpage (première couche vide). `Metadata/model_settings.config` (réglages par objet, dont `layer_height`) est lu même pour un fichier qui n'est pas un projet.
+
 ## 3. Choix ArborFDM
 
 1. **Tous les objets sont `type="model"`.** `type="support"` ferait disparaître les supports dans la famille PrusaSlicer, et la spécification autorise tout consommateur à les ignorer. Les supports sont identifiés par leur nom (`<modèle> supports`, `<modèle> raft`).
@@ -31,9 +33,10 @@ Remarque : le comportement Orca/Bambu est lu sur un miroir d'une version de l'im
 3. **Deux dispositions** (`layout`) :
    - `objects` (défaut, conforme à la demande) : un build item par pièce, pour que le slicer les affiche comme objets distincts. **Risque connu** : un slicer qui pose chaque objet sur le plateau ou réarrange les items casse l'alignement modèle/supports. Ici le modèle repose sur ses supports (z min modèle > 0) : à vérifier dans chaque slicer.
    - `components` : un objet parent composé des pièces et un seul build item. Les positions relatives sont garanties par la spécification (« MUST respect the relative positions of components »). C'est l'option de repli si `objects` s'avère cassé dans un slicer.
+   - `separate` (ajoutée après l'essai dans OrcaSlicer 2.4.2) : objets séparés **qui touchent tous le plateau** ; le radeau va dans le même objet que les supports qui reposent dessus, les arbres posés seulement sur le modèle vont avec le modèle. Ainsi aucun objet n'est descendu ni regroupé par Orca/Bambu, et la descente de PrusaSlicer/Cura ne déplace rien. Option : `layer_heights` écrit `Metadata/model_settings.config` (extension Orca/Bambu, `layer_height` par objet), seul fichier non Core ajouté ; le paquet reste valide pour lib3mf en mode strict.
 4. **Octant positif** : la scène est translatée (transform du build item) pour que xyz >= 0 ; la translation est renvoyée (`ExportResult.offset`).
 5. Métadonnées : `Application=ArborFDM`, `Title`, `CreationDate`, plus `arbor:support_params` (JSON) dans le namespace `http://arborfdm.org/3mf/2026` déclaré sur `<model>`.
-6. Pas d'extension (Production, Materials, BambuStudio `model_settings.config`, `Slic3r_PE_model.config`) : seulement le Core, pour rester neutre.
+6. Pas d'extension (Production, Materials, `Slic3r_PE_model.config`) : seulement le Core, pour rester neutre. Exception : `Metadata/model_settings.config` d'Orca/Bambu, uniquement avec `layout="separate"` et des hauteurs de couche par objet demandées ; ce n'est pas un projet (`Application` reste `ArborFDM`, aucun `project_settings.config`), donc les réglages imprimante/filament de l'utilisateur ne sont pas remplacés.
 
 ## 4. Validation automatique
 

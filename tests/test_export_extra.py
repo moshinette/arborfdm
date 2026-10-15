@@ -142,3 +142,189 @@ def test_weld_on_real_support_mesh(tmp_path):
     geoms = list(trimesh.load(str(p)).geometry.values())
     assert all(g.is_watertight for g in geoms)
     assert sum(g.volume for g in geoms) == pytest.approx(m.volume + sup.volume, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# layout="separate" (OrcaSlicer / Bambu Studio: separate objects, each on the plate)
+# ---------------------------------------------------------------------------
+import xml.etree.ElementTree as ET
+import zipfile
+
+from arbor.io.export import BBS_MODEL_CONFIG
+
+CORE = "{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}"
+
+
+def _scene(on_model_shell=True):
+    """Model box 0..10 on the plate, raft 0..0.8, a support trunk standing on the raft
+    and touching the model, and (optionally) a small support shell standing on the
+    model (its foot at z = 4, on a ledge)."""
+    model = trimesh.creation.box((10, 10, 10))
+    model.apply_translation((0, 0, 5))
+    raft = trimesh.creation.box((20, 20, 0.8))
+    raft.apply_translation((0, 0, 0.4))
+    trunk = trimesh.creation.cylinder(1.0, 6.0, sections=16)
+    trunk.apply_translation((8, 0, 3.8))              # 0.8 .. 6.8, beside the model
+    sup = [trunk]
+    if on_model_shell:
+        twig = trimesh.creation.cylinder(0.5, 3.0, sections=12)
+        twig.apply_translation((-8, 0, 5.5))          # 4 .. 7: floats above plate and raft
+        sup.append(twig)
+    s = trimesh.util.concatenate(sup)
+    return model, s, raft
+
+
+def _objects(path):
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("3D/3dmodel.model"))
+        names = z.namelist()
+        cfg = z.read(BBS_MODEL_CONFIG) if BBS_MODEL_CONFIG in names else None
+        ct = z.read("[Content_Types].xml").decode()
+    objs = {o.get("id"): o.get("name") for o in root.iter(CORE + "object")}
+    items = [i.get("objectid") for i in root.iter(CORE + "item")]
+    return objs, items, cfg, names, ct
+
+
+def test_separate_layout_every_object_on_plate(tmp_path):
+    model, sup, raft = _scene()
+    p = tmp_path / "sep.3mf"
+    er = export_3mf(p, model, sup, raft, model_name="fig", layout="separate")
+    assert validate_export(p) == []
+    assert er.layout == "separate" and er.objects == ["fig", "fig supports + raft"]
+    objs, items, cfg, names, ct = _objects(p)
+    assert len(objs) == 2 and items == ["1", "2"]
+    assert cfg is None and "config" not in ct          # no Orca metadata unless asked
+    assert any("1 of 2 support shells stand only on the model" in n for n in er.notes)
+    # read back: two parts, both resting on the plate (z min = 0 after the offset)
+    parts = {pt.name: pt.mesh for pt in read_3mf(p).parts}
+    assert set(parts) == {"fig", "fig supports + raft"}
+    for name, m in parts.items():
+        assert m.bounds[0][2] == pytest.approx(0.0, abs=1e-6), name
+    # no triangle lost or changed: volumes and bounds of the whole scene
+    assert sum(abs(m.volume) for m in parts.values()) == pytest.approx(
+        model.volume + sup.volume + raft.volume, rel=1e-6)
+    # the shell standing on the model went with the model; trunk + raft with supports
+    assert parts["fig"].bounds[0][0] == pytest.approx(-8.5 + er.offset[0], abs=1e-6)   # twig
+    assert parts["fig"].bounds[0][2] == pytest.approx(0.0, abs=1e-6)
+    assert parts["fig supports + raft"].bounds[0][0] == pytest.approx(-10 + er.offset[0], abs=1e-6)
+    # trimesh read-back (merges by position): every object watertight
+    geoms = list(trimesh.load(str(p)).geometry.values())
+    assert len(geoms) == 2 and all(g.is_watertight for g in geoms)
+
+
+def test_separate_layout_layer_heights_metadata(tmp_path):
+    model, sup, raft = _scene()
+    p = tmp_path / "lh.3mf"
+    er = export_3mf(p, model, sup, raft, model_name="fig", layout="separate",
+                    layer_heights={"model": 0.12, "supports": 0.24})
+    assert validate_export(p) == []
+    objs, items, cfg, names, ct = _objects(p)
+    assert names == ["[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model", BBS_MODEL_CONFIG]
+    assert 'Extension="config"' in ct
+    root = ET.fromstring(cfg)
+    got = {}
+    for o in root.findall("object"):
+        md = {m.get("key"): m.get("value") for m in o.findall("metadata")}
+        part = o.find("part")
+        assert part.get("id") == o.get("id") and part.get("subtype") == "normal_part"
+        assert objs[o.get("id")] == md["name"]          # ids match the 3dmodel objects
+        assert md["extruder"] == "1"
+        got[md["name"]] = float(md["layer_height"])
+    assert got == {"fig": 0.12, "fig supports + raft": 0.24}
+    assert any("per-object layer height" in n for n in er.notes)
+    # only one key: the other object gets no layer_height
+    p2 = tmp_path / "lh1.3mf"
+    export_3mf(p2, model, sup, raft, model_name="fig", layout="separate",
+               layer_heights={"supports": 0.3})
+    root = ET.fromstring(_objects(p2)[2])
+    lhs = {o.find("metadata").get("value"): [m.get("value") for m in o.findall("metadata")
+                                             if m.get("key") == "layer_height"]
+           for o in root.findall("object")}
+    assert lhs == {"fig": [], "fig supports + raft": ["0.3"]}
+
+
+def test_separate_layout_lib3mf_strict(tmp_path):
+    lib3mf = pytest.importorskip("lib3mf")
+    model, sup, raft = _scene()
+    p = tmp_path / "lh.3mf"
+    export_3mf(p, model, sup, raft, model_name="fig", layout="separate",
+               layer_heights={"model": 0.12, "supports": 0.24})
+    w = lib3mf.get_wrapper()
+    m = w.CreateModel()
+    r = m.QueryReader("3mf")
+    r.SetStrictModeActive(True)
+    r.ReadFromFile(str(p))
+    assert r.GetWarningCount() == 0, [r.GetWarning(i) for i in range(r.GetWarningCount())]
+    it, got = m.GetMeshObjects(), {}
+    while it.MoveNext():
+        o = it.GetCurrentMeshObject()
+        assert o.IsManifoldAndOriented(), o.GetName()
+        got[o.GetName()] = o.GetTriangleCount()
+    assert set(got) == {"fig", "fig supports + raft"}
+    bi, n = m.GetBuildItems(), 0
+    while bi.MoveNext():
+        n += 1
+    assert n == 2
+
+
+def test_separate_layout_without_raft_or_supports(tmp_path):
+    model, sup, raft = _scene(on_model_shell=False)
+    sup.apply_translation((0, 0, -0.8))                # trunk now stands on the plate
+    er = export_3mf(tmp_path / "a.3mf", model, sup, None, model_name="m", layout="separate")
+    assert er.objects == ["m", "m supports"] and er.notes == []
+    er = export_3mf(tmp_path / "b.3mf", model, None, None, model_name="m", layout="separate")
+    assert er.objects == ["m"]
+    er = export_3mf(tmp_path / "c.3mf", model, None, raft, model_name="m", layout="separate")
+    assert er.objects == ["m", "m raft"]
+    for f in ("a", "b", "c"):
+        assert validate_export(tmp_path / f"{f}.3mf") == []
+
+
+def test_separate_layout_floating_model_becomes_one_object(tmp_path):
+    """A model lifted above the plate (resting only on its supports) cannot be a
+    separate object: it would be dropped (alignment lost) or refused by OrcaSlicer
+    (empty first layer). Everything is written as one object, with a note."""
+    model, sup, raft = _scene(on_model_shell=False)
+    model.apply_translation((0, 0, 2.0))
+    er = export_3mf(tmp_path / "f.3mf", model, sup, raft, model_name="m", layout="separate",
+                    layer_heights={"model": 0.1, "supports": 0.2})
+    assert er.objects == ["m with supports"]
+    assert any("does not reach the plate" in n for n in er.notes)
+    root = ET.fromstring(_objects(tmp_path / "f.3mf")[2])
+    (o,) = root.findall("object")
+    assert {m.get("key"): m.get("value") for m in o.findall("metadata")}["layer_height"] == "0.1"
+
+
+def test_layer_heights_need_separate_layout(tmp_path):
+    model, sup, raft = _scene()
+    with pytest.raises(ValueError, match="separate"):
+        export_3mf(tmp_path / "x.3mf", model, sup, raft, layer_heights={"model": 0.1})
+    with pytest.raises(ValueError, match="unknown key"):
+        export_3mf(tmp_path / "x.3mf", model, sup, raft, layout="separate", layer_heights={"raft": 0.1})
+    with pytest.raises(ValueError, match=r"\(0, 2\]"):
+        export_3mf(tmp_path / "x.3mf", model, sup, raft, layout="separate", layer_heights={"model": 0})
+    with pytest.raises(ValueError, match="layout"):
+        export_3mf(tmp_path / "x.3mf", model, layout="orca")
+    assert not (tmp_path / "x.3mf").exists()
+
+
+def test_separate_layout_on_engine_output(tmp_path):
+    """Real engine output with a raft (shelf): every object on the plate, volumes kept."""
+    from arbor.engine import pipeline
+    from arbor.engine.params import load_profiles
+    from tests.models import synthetic as S
+    m = S.shelf()
+    params = load_profiles()["nozzle_04_normal"].params.updated(raft_enabled=True)
+    res = pipeline.generate(m, params)
+    assert res.raft_mesh is not None and len(res.raft_mesh.faces)
+    p = tmp_path / "shelf_sep.3mf"
+    er = export_3mf(p, m, res.support_mesh, res.raft_mesh, params, model_name="shelf",
+                    layout="separate", layer_heights={"model": 0.12, "supports": 0.24})
+    assert validate_export(p) == []
+    parts = read_3mf(p).parts
+    assert 1 <= len(parts) <= 2
+    for pt in parts:
+        assert pt.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6), pt.name
+        assert check_mesh(pt.mesh).watertight, pt.name
+    total = m.volume + res.support_mesh.volume + res.raft_mesh.volume
+    assert sum(abs(pt.mesh.volume) for pt in parts) == pytest.approx(total, rel=1e-5)

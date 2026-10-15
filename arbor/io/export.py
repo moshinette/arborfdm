@@ -9,6 +9,14 @@
     ``layout="components"``: one extra parent object made of components referencing the
     parts, and a single build item: the parts keep their relative position as one
     assembly.
+    ``layout="separate"``: separate objects that each rest on the plate (z min = plate),
+    so that slicers which drop every object to the bed (PrusaSlicer, OrcaSlicer, Bambu
+    Studio) keep the alignment and OrcaSlicer does not merge them. The raft is written in
+    the same object as the supports (several shells in one mesh): alone, the supports
+    start on top of the raft and would float. Support shells standing only on the model
+    are written in the model object (see :func:`_separate_groups`). Optionally (``layer_heights``) a
+    ``Metadata/model_settings.config`` gives each object its own ``layer_height`` for
+    OrcaSlicer / Bambu Studio (ignored by other consumers). See docs/SLICERS.md.
   * unit="millimeter"; the whole scene is shifted in XY (build item transform) so that
     it lies in the positive octant as recommended by the spec; the shift is returned.
   * Metadata Application=ArborFDM (+ Title, CreationDate) and namespaced
@@ -300,11 +308,52 @@ def _mesh_xml(mesh: trimesh.Trimesh) -> str:
     return _mesh_xml_from(_format_vertices(mesh.vertices), np.asarray(mesh.faces, np.int64))
 
 
-def _content_types() -> bytes:
+def _content_types(extra: Sequence[tuple[str, str]] = ()) -> bytes:
     root = ET.Element("Types", xmlns=CT_NS)
     ET.SubElement(root, "Default", Extension="rels", ContentType=RELS_CT)
     ET.SubElement(root, "Default", Extension="model", ContentType=MODEL_CT)
+    for ext, ct in extra:
+        ET.SubElement(root, "Default", Extension=ext, ContentType=ct)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+LAYOUTS = ("objects", "components", "separate")
+PLATE_TOL = 1e-3       # mm: an object "rests on the plate" if its z min is within this
+# OrcaSlicer / Bambu Studio per-object settings (read by bbs_3mf.cpp for any 3MF, not
+# only for their own projects; see docs/SLICERS.md).
+BBS_MODEL_CONFIG = "Metadata/model_settings.config"
+CONFIG_CT = "application/xml"
+
+
+def _model_settings_config(objects: Sequence[tuple[int, str, Optional[float]]]) -> bytes:
+    """Metadata/model_settings.config declaring each (object id, name, layer height).
+    The part id is the object id: each object is a single <mesh> object."""
+    root = ET.Element("config")
+    for oid, name, lh in objects:
+        o = ET.SubElement(root, "object", id=str(oid))
+        ET.SubElement(o, "metadata", key="name", value=name)
+        ET.SubElement(o, "metadata", key="extruder", value="1")
+        if lh is not None:
+            ET.SubElement(o, "metadata", key="layer_height", value=f"{lh:g}")
+        p = ET.SubElement(o, "part", id=str(oid), subtype="normal_part")
+        ET.SubElement(p, "metadata", key="name", value=name)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _check_layer_heights(layer_heights) -> dict[str, float]:
+    if not layer_heights:
+        return {}
+    out = {}
+    for k, v in dict(layer_heights).items():
+        if k not in ("model", "supports"):
+            raise ValueError(f"layer_heights: unknown key {k!r} (expected 'model' and/or 'supports')")
+        if v is None:
+            continue
+        v = float(v)
+        if not (np.isfinite(v) and 0.0 < v <= 2.0):
+            raise ValueError(f"layer_heights[{k!r}] must be in (0, 2] mm, got {v}")
+        out[k] = v
+    return out
 
 
 def _rels() -> bytes:
@@ -316,12 +365,22 @@ def _rels() -> bytes:
 def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trimesh.Trimesh] = None,
                raft: Optional[trimesh.Trimesh] = None, params=None, model_name: str = "model",
                *, layout: str = "objects", positive_octant: bool = True,
-               title: Optional[str] = None, weld: bool = True) -> ExportResult:
+               title: Optional[str] = None, weld: bool = True,
+               layer_heights: Optional[dict] = None) -> ExportResult:
     """Write model (+ supports, + raft) to a 3MF package. Input meshes are in plate
     coordinates (mm, z up) and are not modified. ``weld``: see :func:`weld_for_export`
-    (actions reported in ``ExportResult.notes``)."""
-    if layout not in ("objects", "components"):
-        raise ValueError("layout must be 'objects' or 'components'")
+    (actions reported in ``ExportResult.notes``).
+
+    ``layout``: ``"objects"`` (default), ``"components"`` or ``"separate"`` (see the
+    module docstring). ``layer_heights`` (only with ``"separate"``): ``{"model": mm,
+    "supports": mm}``, written as per-object ``layer_height`` for OrcaSlicer / Bambu
+    Studio in ``Metadata/model_settings.config``; either key may be omitted."""
+    if layout not in LAYOUTS:
+        raise ValueError(f"layout must be one of {', '.join(LAYOUTS)}")
+    lh = _check_layer_heights(layer_heights)
+    if lh and layout != "separate":
+        raise ValueError("layer_heights needs layout='separate' (otherwise slicers merge or "
+                         "drop the objects and the per-object settings break the alignment)")
     path = Path(path)
     parts: list[tuple[str, trimesh.Trimesh]] = []
     if model is None or len(model.faces) == 0:
@@ -342,6 +401,16 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
         offset[2] = max(-lo[2], 0.0)
     tmat = np.eye(4)
     tmat[:3, 3] = offset
+    notes: list[str] = []
+
+    # objects to write: (object name, role, [(part name, mesh), ...]); one <mesh> each
+    if layout == "separate":
+        groups = _separate_groups(
+            model_name, model, supports if supports is not None and len(supports.faces) else None,
+            raft if raft is not None and len(raft.faces) else None, float(lo[2]), notes)
+    else:
+        groups = [(name, "model" if i == 0 else "supports", [(name, m)])
+                  for i, (name, m) in enumerate(parts)]
 
     now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
     out = io.StringIO()
@@ -355,41 +424,136 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
         out.write(f'<metadata name="arbor:support_params">{escape(json.dumps(pdict, sort_keys=True))}</metadata>\n')
     out.write("<resources>\n")
     names = []
-    notes: list[str] = []
     n_tri = 0
-    for i, (name, m) in enumerate(parts, start=1):
-        names.append(name)
-        txt, _wv, wf, rep = weld_for_export(m, name) if weld else (
-            _format_vertices(m.vertices), None, np.asarray(m.faces, np.int64), WeldReport(name))
-        if rep.applied or (weld and rep.reason and not rep.reason.startswith("no vertices")):
-            notes.append(rep.describe())
+    for i, (oname, _role, members) in enumerate(groups, start=1):
+        names.append(oname)
+        txts, fs, nv = [], [], 0
+        for pname, m in members:
+            txt, _wv, wf, rep = weld_for_export(m, pname) if weld else (
+                _format_vertices(m.vertices), None, np.asarray(m.faces, np.int64), WeldReport(pname))
+            if rep.applied or (weld and rep.reason and not rep.reason.startswith("no vertices")):
+                notes.append(rep.describe())
+            txts.append(txt)
+            fs.append(np.asarray(wf, np.int64) + nv)
+            nv += len(txt)
+        wf = np.vstack(fs)
         n_tri += len(wf)
-        out.write(f'<object id="{i}" type="model" name={quoteattr(name)}>')
-        out.write(_mesh_xml_from(txt, wf))
+        out.write(f'<object id="{i}" type="model" name={quoteattr(oname)}>')
+        out.write(_mesh_xml_from(np.vstack(txts), wf))
         out.write("</object>\n")
     if layout == "components":
-        pid = len(parts) + 1
+        pid = len(groups) + 1
         out.write(f'<object id="{pid}" type="model" name={quoteattr(model_name + " assembly")}><components>')
-        for i in range(1, len(parts) + 1):
+        for i in range(1, len(groups) + 1):
             out.write(f'<component objectid="{i}"/>')
         out.write("</components></object>\n")
     out.write("</resources>\n<build>\n")
     tr = format_3mf_matrix(tmat)
     if layout == "components":
-        out.write(f'<item objectid="{len(parts) + 1}" transform="{tr}"/>\n')
+        out.write(f'<item objectid="{len(groups) + 1}" transform="{tr}"/>\n')
     else:
-        for i in range(1, len(parts) + 1):
+        for i in range(1, len(groups) + 1):
             out.write(f'<item objectid="{i}" transform="{tr}"/>\n')
     out.write("</build>\n</model>\n")
+
+    extra_files: dict[str, bytes] = {}
+    if lh:
+        extra_files[BBS_MODEL_CONFIG] = _model_settings_config(
+            [(i, oname, lh.get(role)) for i, (oname, role, _m) in enumerate(groups, start=1)])
+        notes.append("OrcaSlicer / Bambu Studio per-object layer height: " + ", ".join(
+            f"{oname} = {lh[role]:g} mm" for oname, role, _m in groups if role in lh)
+            + " (Metadata/model_settings.config; other slicers use their own setting).")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".part")
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", _content_types())
+        zf.writestr("[Content_Types].xml",
+                    _content_types([("config", CONFIG_CT)] if extra_files else ()))
         zf.writestr("_rels/.rels", _rels())
         zf.writestr(MODEL_PATH, out.getvalue().encode("utf-8"))
+        for name, data in extra_files.items():
+            zf.writestr(name, data)
     tmp.replace(path)
     return ExportResult(path, offset, names, int(n_tri), layout, notes)
+
+
+def _shell_labels(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Connected component (shell) of every face, by shared edges (vertex indices)."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    f = np.asarray(mesh.faces, np.int64)
+    n = len(f)
+    e = np.sort(np.vstack([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
+    fid = np.tile(np.arange(n), 3)
+    _, inv = np.unique(e, axis=0, return_inverse=True)
+    inv = inv.ravel()
+    order = np.argsort(inv, kind="stable")
+    a, b = fid[order][:-1], fid[order][1:]
+    same = inv[order][:-1] == inv[order][1:]
+    g = coo_matrix((np.ones(int(same.sum())), (a[same], b[same])), shape=(n, n))
+    return connected_components(g, directed=False)[1]
+
+
+def _submesh(mesh: trimesh.Trimesh, face_mask: np.ndarray) -> trimesh.Trimesh:
+    f = np.asarray(mesh.faces, np.int64)[face_mask]
+    used, nf = np.unique(f, return_inverse=True)
+    return trimesh.Trimesh(np.asarray(mesh.vertices)[used], nf.reshape(-1, 3), process=False, validate=False)
+
+
+def _separate_groups(model_name: str, model: trimesh.Trimesh, supports: Optional[trimesh.Trimesh],
+                     raft: Optional[trimesh.Trimesh], plate_z: float, notes: list[str]
+                     ) -> list[tuple[str, str, list[tuple[str, trimesh.Trimesh]]]]:
+    """Objects (name, role, [(part name, mesh)]) for ``layout="separate"``.
+
+    Every object must rest on the plate: OrcaSlicer / Bambu Studio (and PrusaSlicer)
+    drop each object of a non-project 3MF to the bed, and an object kept in the air has
+    an empty first layer, which OrcaSlicer refuses to slice (docs/SLICERS.md). So:
+
+    * the raft and the support shells that stand on the plate or on the raft form the
+      supports object;
+    * support shells standing only on the model (their foot is on the model) go with
+      the model: alone they would leave empty layers in the supports object;
+    * if the model itself does not reach the plate, everything is one object.
+    Every move is reported in ``notes``; no triangle is changed."""
+    sup_name = f"{model_name} supports"
+    model_members = [(model_name, model)]
+    sup_members: list[tuple[str, trimesh.Trimesh]] = []
+    ground = plate_z + PLATE_TOL
+    base_top = max(ground, float(raft.bounds[1][2]) + PLATE_TOL) if raft is not None else ground
+    if supports is not None:
+        labels = _shell_labels(supports)
+        n_shells = int(labels.max()) + 1
+        zmin = np.full(n_shells, np.inf)
+        tri_z = np.asarray(supports.vertices)[np.asarray(supports.faces)][:, :, 2].min(axis=1)
+        np.minimum.at(zmin, labels, tri_z)
+        grounded = zmin <= base_top
+        on_plate = grounded[labels]
+        if on_plate.all():
+            sup_members.append((sup_name, supports))
+        else:
+            n_up = int((~grounded).sum())
+            if on_plate.any():
+                sup_members.append((sup_name, _submesh(supports, on_plate)))
+            model_members.append((f"{sup_name} on model", _submesh(supports, ~on_plate)))
+            notes.append(f"separate layout: {n_up} of {n_shells} support shells stand only on the "
+                         f"model (lowest foot {zmin[~grounded].min() - plate_z:.2f} mm above the "
+                         f"plate); they are written in the '{model_name}' object, otherwise the "
+                         "supports object would have empty layers.")
+    if raft is not None:
+        sup_members.append((f"{model_name} raft", raft))
+    sname = (f"{model_name} supports + raft" if raft is not None and len(sup_members) > 1
+             else sup_members[0][0] if sup_members else sup_name)
+    groups = [(model_name, "model", model_members)]
+    if sup_members:
+        groups.append((sname, "supports", sup_members))
+    lowest = lambda members: min(float(m.bounds[0][2]) for _, m in members)
+    floating = [g for g in groups if lowest(g[2]) > ground]
+    if floating and len(groups) == 2:
+        notes.append("separate layout: " + ", ".join(
+            f"'{g[0]}' does not reach the plate (z min {lowest(g[2]) - plate_z:.3f} mm)" for g in floating)
+            + "; everything is written as one object to keep the alignment.")
+        groups = [(f"{model_name} with supports", "model", groups[0][2] + groups[1][2])]
+    return groups
 
 
 # ---------------------------------------------------------------------------

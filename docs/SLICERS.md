@@ -1,6 +1,6 @@
 # Import du 3MF ArborFDM dans les slicers
 
-Consulté le 2026-10-15. **Aucun slicer n'a été lancé** : ils ne sont pas installés dans l'environnement de développement. Tout ce qui suit vient de la lecture du code source des importeurs (versions indiquées) et de messages de forum. C'est une prévision à confirmer, pas un résultat d'essai. Voir aussi [research/3mf_export.md](research/3mf_export.md).
+Consulté le 2026-10-15. Les § 1 à 5 viennent de la lecture du code source des importeurs (versions indiquées) et de messages de forum. Les deux dernières sections ajoutent un essai réel de l'utilisateur dans OrcaSlicer 2.4.2 (Windows) et des essais de **la CLI d'OrcaSlicer 2.4.2** (AppImage Linux, même `libslic3r` que l'interface) faits dans l'environnement de développement. L'interface graphique d'Orca, Bambu Studio, PrusaSlicer et Cura n'ont pas été lancés ici. Voir aussi [research/3mf_export.md](research/3mf_export.md).
 
 > **À l'impression : désactivez les supports du slicer** (PrusaSlicer « Supports : aucun », Bambu/Orca « Enable support » décoché, Cura « Generate Support » décoché). Les supports ArborFDM sont un objet du fichier ; si le slicer en ajoute d'autres, ils s'ajoutent sous le modèle et sous nos arbres.
 
@@ -14,9 +14,10 @@ Consulté le 2026-10-15. **Aucun slicer n'a été lancé** : ils ne sont pas ins
 | Objets | un `<object type="model">` par pièce : `<nom>`, `<nom> supports`, `<nom> raft` (si radeau). Pas de `type="support"` (jeté par la famille PrusaSlicer, cf. § 2) |
 | Disposition `objects` (défaut) | un `<item>` par pièce, même transform (translation vers l'octant positif) |
 | Disposition `components` (`--layout components`) | un objet parent `<nom> assembly` fait de `<component>`, un seul `<item>` |
+| Disposition `separate` (`--layout separate`) | deux objets **qui touchent tous les deux le plateau** : `<nom>` et `<nom> supports + raft` (radeau et supports dans le même maillage) ; les arbres posés uniquement sur le modèle vont dans l'objet modèle. Option : `Metadata/model_settings.config` avec une hauteur de couche par objet (Orca/Bambu). Cf. § « Cause trouvée » |
 | Position | modèle et supports en coordonnées plateau ; le modèle **ne touche pas** le plateau quand il repose sur ses supports (z min modèle > 0) |
 | Maillages | chaque pièce est fermée et 2-manifold ; les sommets à moins de 1e-5 mm sont soudés à l'écriture (cf. § 4) |
-| Extensions | aucune (ni `Slic3r_PE_model.config`, ni `model_settings.config` Bambu, ni Production) |
+| Extensions | aucune (ni `Slic3r_PE_model.config`, ni Production) ; `Metadata/model_settings.config` (Orca/Bambu) seulement avec `--layout separate` et une hauteur de couche par objet |
 | Métadonnées | `Application`, `Title`, `CreationDate`, `arbor:support_params` (namespace déclaré) |
 
 ## 2. Comportement attendu par slicer (lecture de code, non testé)
@@ -26,16 +27,17 @@ Consulté le 2026-10-15. **Aucun slicer n'a été lancé** : ils ne sont pas ins
 | `type="model"` | accepté | accepté (`model`, `other`) | accepté |
 | `type="support"` | **objet ignoré** : `VALID_OBJECT_TYPES = {"model"}`, `support`/`solidsupport`/`surface` listés invalides [^ps3mf] | **ignoré** : `BBS_VALID_OBJECT_TYPES = {"model","other"}` [^orca3mf] | non déterminé : le XML est lu par la bibliothèque Savitar, `ThreeMFReader.py` ne teste pas le type [^cura] |
 | Plusieurs `<item>` | un objet par item | idem | un nœud par item |
-| `<components>` | résolus en **instances séparées des objets feuilles** (`_create_object_instance`, alias de composants) : même résultat que `objects` [^ps3mf] | idem (même origine de code) | un nœud **groupe** avec enfants (transforms composées) [^cura] |
+| `<components>` | résolus en **instances séparées des objets feuilles** (`_create_object_instance`, alias de composants) : même résultat que `objects` [^ps3mf] | **corrigé (lu dans v2.4.2 et essayé en CLI)** : un seul objet dont chaque composant devient une pièce (`bbs_3mf.cpp` l. 2138-2160) ; positions conservées | un nœud **groupe** avec enfants (transforms composées) [^cura] |
 | Pose sur le plateau | pour un 3MF qui n'est pas un projet PrusaSlicer, chaque objet passe par `ensure_on_bed(false)` : **chaque objet est descendu à z = 0** [^psplater] [^psmodel] | même appel `ensure_on_bed(is_project_file)` [^orcaplater] ; confirmé par les forums [^bambudrop] | réglage par nœud `drop_to_buildplate` sinon préférence « Automatically drop models to the build plate » (non vérifié : valeur par défaut) ; recentrage de l'ensemble (`centerNodesToBuildPlate`) [^cura] |
-| Dialogue multi-pièces | si plusieurs objets dont les boîtes englobantes se chevauchent ou se touchent : « This file contains several objects positioned at multiple heights. Instead of considering them as multiple objects, should the file be loaded as a single object having multiple parts? » [^psplater] [^psfr] | même dialogue (« ... single object with multiple parts? ») si le fichier n'est pas un projet [^orcaplater] [^bambuwarn] | pas de dialogue |
+| Dialogue multi-pièces | si plusieurs objets dont les boîtes englobantes se chevauchent ou se touchent : « This file contains several objects positioned at multiple heights. Instead of considering them as multiple objects, should the file be loaded as a single object having multiple parts? » [^psplater] [^psfr] | même texte, mais **autre critère** : les objets n'ont pas tous le même z min (`Model::looks_like_multipart_object`, cf. § « Cause trouvée ») [^orcaplater] [^bambuwarn] | pas de dialogue |
 
 ### Conséquences pour nos fichiers
 
 - **PrusaSlicer, OrcaSlicer, Bambu Studio** : nos supports touchent le modèle, donc les boîtes se chevauchent et le dialogue « Multi-part object detected » devrait apparaître.
   - Répondre **Oui** : le fichier devient un seul objet à plusieurs pièces, positions relatives conservées (`convert_to_multipart_object` / `convert_multipart_object`). C'est la réponse à donner.
   - Répondre **Non** : chaque objet est descendu sur le plateau ; le modèle tombe à travers ses supports. **Alignement cassé.**
-  - `--layout components` ne change rien dans cette famille (les composants deviennent des objets séparés) [^ps3mf].
+  - `--layout components` ne change rien dans PrusaSlicer (les composants deviennent des objets séparés) [^ps3mf] ; dans OrcaSlicer 2.4.2 il donne un seul objet à plusieurs pièces, sans dialogue.
+- `--layout separate` (cf. dernière section) : aucun objet ne flotte, donc « Oui » comme « Non » gardent l'alignement dans PrusaSlicer, et OrcaSlicer ne pose pas la question.
 - **Cura** : avec la disposition `objects`, chaque nœud risque d'être descendu séparément si la descente automatique est active ; avec `--layout components`, le groupe est descendu d'un bloc (z min du groupe = pied des supports = 0), ce qui conserve l'alignement. **Pour Cura, préférer `--layout components`** ou désactiver « Automatically drop models to the build plate ». Les forums Ultimaker indiquent que les objets d'un 3MF gardent « normalement » leur position [^curaforum].
 - Le Core spec autorise tout consommateur à réarranger les items (« MAY rearrange ») : seule la disposition en un seul objet/groupe est protégée par la spécification (« MUST respect the relative positions of components »).
 
@@ -81,3 +83,59 @@ Premier essai dans un vrai slicer, réalisé par l'utilisateur sous Windows (ape
 - **La buse réglée dans le slicer doit correspondre au profil ArborFDM.** Avec un profil ArborFDM 0,2 découpé alors que la buse réglée dans Orca était différente, les branches fines sortaient en « gap infill » discontinu et les pointes disparaissaient (support qui ne touche plus le modèle). Avec la buse réglée sur 0,2 : supports en parois continues, gap infill à 0,1 %, pointes jusqu'au dessous de l'épée.
 - Supports du slicer désactivés (« Enable support » décoché).
 - Reste à faire : vérifier couche par couche la couche de contact de chaque pointe, et une impression réelle.
+
+## Cause trouvée : regroupement automatique dans OrcaSlicer 2.4.2 (code lu au tag `v2.4.2`, commit `8500fcdc`)
+
+Fichiers lus : `src/slic3r/GUI/Plater.cpp` (`Plater::priv::load_files`), `src/libslic3r/Model.cpp`, `src/libslic3r/Format/bbs_3mf.cpp`, `src/libslic3r/GCode.cpp`, `src/libslic3r/Print.cpp` [^orca242].
+
+1. **Notre 3MF n'est pas un projet Orca/Bambu.** Le lecteur ne le reconnaît comme tel que si `Application` commence par `BambuStudio-` ou `OrcaSlicer-`, ou s'il y a la métadonnée `OrcaSlicer` (`bbs_3mf.cpp` l. 3946-3962). Sinon `En3mfType::From_Other` : géométrie importée sans message (`Plater.cpp` l. 6178-6186) et `is_project_file` reste `false` (il ne passe à `true` qu'avec une configuration de projet chargée, l. 6489).
+2. **Critère du regroupement** (`Model::looks_like_multipart_object`, `Model.cpp` l. 752-769) : vrai s'il y a plusieurs objets, chacun à une seule pièce et sans réglage par objet, et que **leurs z min ne sont pas tous égaux**. Ce n'est pas le chevauchement des boîtes (critère de PrusaSlicer).
+   - `bridge` (sans radeau) : modèle et supports ont z min = 0, donc pas de question, deux objets. C'est l'observation de l'utilisateur.
+   - `figurine` avec radeau : modèle z min = 0, radeau z min = 0, **supports z min = 0,8 mm** (ils partent du dessus du radeau). Le critère est vrai.
+3. Dans ce cas, `Plater.cpp` l. 6734-6743 affiche « Multi-part object detected » et, sur **Oui**, appelle `Model::convert_multipart_object` (`Model.cpp` l. 780-822) : un seul objet nommé d'après le **nom du fichier** (`input_file` sans extension), une pièce par objet du 3MF nommée comme lui. C'est exactement le résultat observé (« figurine » avec « figurine », « figurine supports », « figurine raft »). C'est le **seul** appel de `convert_multipart_object` pour un 3MF (l'autre, l. 6847, ne concerne que l'import de plusieurs fichiers STL/OBJ à la fois). Le code ne contient pas de « ne plus demander » pour ce dialogue (`MessageDialog` simple). **Point non expliqué** : l'utilisateur dit ne pas avoir vu le dialogue ; d'après le code, il a été affiché et validé par Oui (bouton par défaut ?). À revérifier.
+4. Sur **Non**, chaque objet passe par `ensure_on_bed(is_project_file = false)` (`Plater.cpp` l. 6779, `ModelObject::ensure_on_bed` `Model.cpp` l. 1721-1750) : décalage `-min_z`, donc **les supports descendent de 0,8 mm** dans le radeau et sous le modèle. Vérifié avec la CLI (qui fait le même `ensure_on_bed()` pour un 3MF non projet, `src/OrcaSlicer.cpp` l. 1849) : supports z min 0,8 → 0, et le découpage signale « gcode path conflicts found between figurine raft and figurine supports ».
+5. **Pourquoi on ne peut pas garder trois objets séparés dont l'un flotte**, même en empêchant la descente :
+   - l'attribut d'item `auto_drop="0"` (lu pour tout 3MF, `bbs_3mf.cpp` l. 3906 ; vrai par défaut, l. 516-520) empêche bien la descente (vérifié en CLI : supports restés à z min 0,8) ;
+   - mais chaque objet est découpé de z = 0 à son z max (`PrintObject.cpp` l. 113, `slicing_parameters`) et `GCode::collect_layers_to_print` (`GCode.cpp` l. 1776-1779) lève « One object has an empty first layer and can't be printed » pour un objet sans extrusion à la première couche. Vérifié en CLI : échec du découpage (`SlicingErrors`). `auto_drop` n'a donc pas été retenu.
+   - Conclusion : **dans Orca, un objet séparé doit toucher le plateau**. Les supports posés sur le radeau ne peuvent être un objet séparé que s'ils sont dans le même objet que le radeau.
+6. **Réglages par objet sans projet** : `Metadata/model_settings.config` est lu pour tout 3MF (`bbs_3mf.cpp` l. 1952-1960) ; les `<metadata key=... value=...>` d'un `<object>` vont dans la configuration de l'objet (l. 2121-2131), par exemple `layer_height`. Un objet qui a au moins deux réglages (`extruder` + `layer_height`) n'entre plus dans `looks_like_multipart_object`. Sans ce fichier, un objet fait de `<components>` devient un objet à plusieurs pièces (l. 2138-2160).
+7. **Avertissements attendus avec des objets séparés qui se touchent** : le contrôle de collision entre objets (`Print.cpp` l. 2591-2608, `ConflictChecker::find_inter_of_lines_in_diff_objs`) signale des trajets qui se croisent quand les pointes pénètrent le modèle (`tip_penetration`) à la même hauteur de couche ; dans l'interface c'est un « Serious warning » (`GLCanvas3D.cpp` l. 10078-10090), pas une erreur bloquante d'après le code (non vérifié dans l'interface). Les arbres posés sur le modèle laissés dans un objet supports y créeraient des couches vides (« Object can't be printed for empty layer », `GCode.cpp` l. 1820, aussi « Serious warning », `Plater.cpp` l. 9766-9770) : c'est pourquoi ils sont rangés avec le modèle.
+
+## Solution : `--layout separate` (API `export_3mf(..., layout="separate", layer_heights=...)`)
+
+- Deux objets, **tous deux posés sur le plateau** (z min = 0) : `<nom>` (modèle + arbres posés seulement sur le modèle) et `<nom> supports + raft` (coques de supports qui partent du plateau ou du radeau, et le radeau, dans un même `<mesh>`). Chaque partie est soudée séparément puis concaténée ; aucun triangle n'est modifié ; chaque regroupement est signalé dans `ExportResult.notes` / la sortie CLI. Si le modèle lui-même ne touche pas le plateau, tout est écrit en un seul objet (note).
+- Option `--model-layer-height MM` / `--support-layer-height MM` (API `layer_heights={"model": .., "supports": ..}`) : écrit `Metadata/model_settings.config` (`object id` = id de l'objet 3MF, `part id` identique, `name`, `extruder` = 1, `layer_height`) et le type de contenu `config` (`application/xml`). Refusé avec une autre disposition (les réglages par objet supprimeraient la question multi-pièces alors que des objets flottent encore).
+- Le paquet reste du 3MF Core pur : `validate_export`, relecture `trimesh` et **lib3mf 2.5.0 en mode strict : 0 avertissement**, objets « manifold and oriented ».
+- Hors Orca/Bambu : PrusaSlicer peut toujours poser la question multi-pièces (boîtes qui se touchent) mais, aucun objet ne flottant, les deux réponses gardent l'alignement (déduit du code § 2, non essayé) ; Cura ne fait rien de particulier (deux nœuds posés à z = 0, non essayé). `model_settings.config` est ignoré par eux.
+
+### Essais réels (CLI OrcaSlicer 2.4.2, AppImage Linux, préréglages système « Bambu Lab A1 mini », 2026-10-15)
+
+Commande : `orca-slicer --load-settings "machine.json;process.json" --load-filaments filament.json --arrange 0 --orient 0 --slice 0 --export-3mf result.3mf fichier.3mf` (préréglages système aplatis), puis relecture des positions dans le projet exporté par Orca et des couches par objet dans le G-code.
+
+| Fichier (buse 0,2, A1 mini 0,2, `nozzle_02_normal`, radeau) | Positions après chargement | Découpage |
+|---|---|---|
+| `--layout objects` (défaut actuel) | supports descendus de 0,8 mm (z min 0) : **alignement cassé** (= réponse « Non ») | conflit de trajets radeau/supports |
+| `--layout objects` + `auto_drop="0"` (essai manuel, buse 0,4) | conservées | **échec** : première couche vide de l'objet supports |
+| `--layout components` (buse 0,4) | un objet, 3 pièces, conservées | OK |
+| `--layout separate` | 2 objets, conservées | avertissement « conflit de trajets supports/modèle » (contact voulu, même hauteur de couche 0,1) ; G-code produit avec `--no-check` |
+| `--layout separate --model-layer-height 0.06 --support-layer-height 0.12` | 2 objets, conservées | **OK sans avertissement critique** ; G-code : modèle 999 couches de 0,06 mm, supports + radeau 400 couches de 0,12 mm |
+| `bridge`, `--layout separate` | 2 objets, conservées | OK |
+
+Avec la buse 0,4 (`0.20mm Standard @BBL A1M`) : `separate` avec 0,12 / 0,24 mm découpe sans erreur, modèle 499 couches de 0,12, supports 175 couches de 0,24.
+
+### Ce qui reste à vérifier par l'utilisateur (interface graphique)
+
+Non vérifiable ici : l'interface d'Orca (dialogues, liste d'objets), Bambu Studio, PrusaSlicer, Cura, et l'impression.
+
+```
+arborfdm-cli generate examples/figurine.stl -o figurine_separate.3mf --profile nozzle_02_normal --set raft_enabled=true --layout separate --model-layer-height 0.06 --support-layer-height 0.12
+```
+Dans OrcaSlicer 2.4.2 (A1 mini, buse 0,2, supports Orca désactivés), Fichier > Importer :
+1. **Aucune** question « Multi-part object detected » ; la liste d'objets montre **2 objets** : `figurine` et `figurine supports + raft`.
+2. Vue de côté : les pointes touchent le dessous du modèle ; le radeau est sous les arbres ; rien n'a bougé en Z.
+3. Clic droit sur chaque objet > réglages : hauteur de couche 0,06 pour `figurine`, 0,12 pour `figurine supports + raft` (modifiable ensuite).
+4. Découper : noter les avertissements (attendu au plus : « Conflicts of G-code paths ... » si les deux objets ont la même hauteur de couche) et si le bouton d'export/impression reste actif.
+5. Aperçu couche par couche aux hauteurs des pointes : les pointes à 0,12 mm doivent encore toucher le modèle (le dernier niveau des supports peut s'arrêter jusqu'à une demi-couche de support sous la surface ; préférer une hauteur de supports multiple de celle du modèle).
+6. Refaire l'import avec le fichier `--layout objects` et noter si le dialogue « Multi-part object detected » apparaît (point 3 de la cause).
+
+[^orca242]: OrcaSlicer, tag `v2.4.2` (commit `8500fcdccaa10b5099ac20d252af3a7c560046f1`) : <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/Plater.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Model.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Format/bbs_3mf.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/GCode.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Print.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/OrcaSlicer.cpp>. Binaire essayé : `OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage` (release GitHub v2.4.2).

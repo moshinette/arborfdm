@@ -9,6 +9,7 @@ The viewport never edits the project: it emits signals handled by the main windo
 from __future__ import annotations
 
 import math
+import time
 from typing import Optional
 
 import numpy as np
@@ -18,8 +19,13 @@ from OpenGL import GL
 from pyqtgraph.opengl import shaders
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from . import theme
+from . import overhang, theme
 from .picking import BackgroundPicker
+
+try:        # pyqtgraph >= 0.14 uploads vertex buffers only when flagged dirty
+    from pyqtgraph.opengl.items.GLMeshItem import DirtyFlag as _DirtyFlag
+except ImportError:     # pragma: no cover - pyqtgraph 0.13
+    _DirtyFlag = None
 
 CLICK_TOLERANCE_PX = 5          # a press/release closer than this is a click, not a drag
 CONTACT_PICK_RADIUS_PX = 9
@@ -95,6 +101,86 @@ def clip_mesh(mesh: trimesh.Trimesh, z: float) -> Optional[trimesh.Trimesh]:
         return trimesh.Trimesh(mesh.vertices, mesh.faces[keep], process=False)
 
 
+class FaceColorMeshItem(gl.GLMeshItem):
+    """GLMeshItem whose per-face colours can change without re-sending the geometry:
+    only the colour buffer is rebuilt and uploaded (threshold change on a 1 M face mesh)."""
+
+    COLOR_DTYPE = np.uint8 if _DirtyFlag is not None else np.float32
+
+    def __init__(self, **kw):
+        self._vertex_rgba: Optional[np.ndarray] = None
+        self._colors_dirty = False
+        super().__init__(**kw)
+
+    def set_vertex_colors(self, rgba: Optional[np.ndarray]) -> None:
+        """(3 * faces, 4) colours for the non-indexed draw, or None for the plain colour."""
+        self._vertex_rgba = rgba
+        self._colors_dirty = True
+        self.update()
+
+    def has_custom_colors(self) -> bool:
+        return self._vertex_rgba is not None
+
+    def parseMeshData(self):
+        fresh = self.vertexes is None
+        bits = super().parseMeshData()
+        if (fresh or self._colors_dirty) and self.vertexes is not None:
+            rgba = self._vertex_rgba
+            n = int(np.prod(self.vertexes.shape[:-1]))
+            self.colors = rgba if rgba is not None and len(rgba) == n else None
+            self._colors_dirty = False
+            if _DirtyFlag is not None:
+                bits = (bits or _DirtyFlag(0)) | _DirtyFlag.COLOR
+        return bits
+
+
+class OverhangLegend(QtWidgets.QFrame):
+    """Angle bands of the overhang colouring, with the area of each band."""
+
+    def __init__(self, parent: QtWidgets.QWidget):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.setStyleSheet("QFrame { background: rgba(22,24,29,215); border: 1px solid #323743;"
+                           " border-radius: 6px; } QLabel { border: none; background: transparent;"
+                           " font-size: 8.5pt; }")
+        lay = QtWidgets.QGridLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setHorizontalSpacing(6)
+        lay.setVerticalSpacing(2)
+        self.title = QtWidgets.QLabel("")
+        self.title.setStyleSheet("color: white; font-weight: 600; border: none;")
+        lay.addWidget(self.title, 0, 0, 1, 3)
+        self.range_labels: dict[str, QtWidgets.QLabel] = {}
+        self.area_labels: dict[str, QtWidgets.QLabel] = {}
+        base = "#%02x%02x%02x" % tuple(int(c * 255) for c in theme.MODEL_COLOR[:3])
+        for r, key in enumerate(overhang.BAND_KEYS, start=1):
+            dot = QtWidgets.QLabel()
+            dot.setFixedSize(10, 10)
+            dot.setStyleSheet(f"background: {overhang.BAND_HEX.get(key, base)}; "
+                              "border-radius: 2px; border: none;")
+            name = QtWidgets.QLabel("")
+            area = QtWidgets.QLabel("")
+            area.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            area.setStyleSheet("color: #c8ccd4; border: none;")
+            lay.addWidget(dot, r, 0)
+            lay.addWidget(name, r, 1)
+            lay.addWidget(area, r, 2)
+            self.range_labels[key] = name
+            self.area_labels[key] = area
+        note = QtWidgets.QLabel("Angle from vertical. Faces on the plate are ignored.")
+        note.setStyleSheet("color: #8a92a3; border: none; font-size: 8pt;")
+        lay.addWidget(note, len(overhang.BAND_KEYS) + 1, 0, 1, 3)
+        self.set_state(55.0, None)
+
+    def set_state(self, threshold: float, areas: Optional[np.ndarray]) -> None:
+        self.title.setText(f"Overhangs  (threshold {threshold:.0f}\u00b0)")
+        for b in overhang.bands(threshold):
+            self.range_labels[b.key].setText(b.label)
+        for k, key in enumerate(overhang.BAND_KEYS):
+            self.area_labels[key].setText("" if areas is None else f"{areas[k]:.0f} mm\u00b2")
+        self.adjustSize()
+
+
 class Legend(QtWidgets.QFrame):
     """Contact reasons with colours and counts, drawn over the 3D view."""
 
@@ -152,6 +238,16 @@ class Viewport(gl.GLViewWidget):
         self.ghost_enabled = True
         self.tip_length = 1.6
         self.tip_radius = 0.5
+        # overhang colouring (display only)
+        self.overhang_enabled = False
+        self.overhang_threshold = 55.0
+        self.overhang_plate_height = 0.12
+        self.overhang_classes: Optional[np.ndarray] = None     # band index per shown face
+        self.overhang_areas: Optional[np.ndarray] = None
+        self.overhang_timings: dict[str, float] = {}
+        self._angle_cache: Optional[tuple] = None      # (mesh, angles, top z, areas)
+        self._model_shown: Optional[trimesh.Trimesh] = None
+        self._overhang_key: Optional[tuple] = None
 
         self.model_mesh: Optional[trimesh.Trimesh] = None
         self.support_mesh: Optional[trimesh.Trimesh] = None
@@ -174,7 +270,7 @@ class Viewport(gl.GLViewWidget):
         self.axes = gl.GLLinePlotItem(mode="lines", width=2, antialias=True)
         self.addItem(self.axes)
 
-        self.model_item = self._mesh_item(theme.MODEL_COLOR)
+        self.model_item = self._mesh_item(theme.MODEL_COLOR, FaceColorMeshItem)
         self.support_item = self._mesh_item(theme.SUPPORT_COLOR)
         self.raft_item = self._mesh_item(theme.RAFT_COLOR)
         self.selection_item = gl.GLScatterPlotItem(pxMode=True, glOptions=OVERLAY_GL)
@@ -203,6 +299,8 @@ class Viewport(gl.GLViewWidget):
         self.addItem(self.ghost_item)
 
         self.legend = Legend(self)
+        self.overhang_legend = OverhangLegend(self)
+        self.overhang_legend.hide()
         self._hover_timer = QtCore.QTimer(self, singleShot=True, interval=HOVER_INTERVAL_MS)
         self._hover_timer.timeout.connect(self._update_hover)
         self._clip_timer = QtCore.QTimer(self, singleShot=True, interval=60)
@@ -211,8 +309,8 @@ class Viewport(gl.GLViewWidget):
         self.setCameraPosition(distance=160, elevation=25, azimuth=-60)
 
     # ------------------------------------------------------------------ items
-    def _mesh_item(self, color) -> gl.GLMeshItem:
-        item = gl.GLMeshItem(color=color, smooth=False, shader=_LIT_SHADER, glOptions="opaque")
+    def _mesh_item(self, color, cls=gl.GLMeshItem) -> gl.GLMeshItem:
+        item = cls(color=color, smooth=False, shader=_LIT_SHADER, glOptions="opaque")
         item.hide()
         self.addItem(item)
         return item
@@ -272,6 +370,61 @@ class Viewport(gl.GLViewWidget):
               if m is not None and len(m.faces)]
         return float(max(hs)) if hs else 0.0
 
+    # ------------------------------------------------------------------ overhang colours
+    def set_overhang_display(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled != self.overhang_enabled:
+            self.overhang_enabled = enabled
+            self._update_overhang_colors()
+
+    def set_overhang_params(self, threshold_deg: float, plate_height: float) -> None:
+        """Current overhang_angle_deg and layer height: colours follow them."""
+        t, h = float(threshold_deg), float(plate_height)
+        if (t, h) == (self.overhang_threshold, self.overhang_plate_height):
+            return
+        self.overhang_threshold, self.overhang_plate_height = t, h
+        if self.overhang_enabled:
+            self._update_overhang_colors()
+
+    def _face_data(self, mesh: trimesh.Trimesh) -> tuple:
+        c = self._angle_cache
+        if c is not None and c[0] is mesh:
+            return c[1:]
+        data = overhang.face_geometry(mesh.vertices, mesh.faces)
+        self._angle_cache = (mesh,) + data
+        return data
+
+    def _update_overhang_colors(self) -> None:
+        mesh = self._model_shown
+        active = self.overhang_enabled and mesh is not None
+        if not active:
+            if self.model_item.has_custom_colors():
+                self.model_item.set_vertex_colors(None)
+            self.overhang_classes = self.overhang_areas = None
+            self._overhang_key = None
+            self.overhang_legend.hide()
+            return
+        key = (id(mesh), self.overhang_threshold, self.overhang_plate_height)
+        if key == self._overhang_key and self.model_item.has_custom_colors() \
+                and self._angle_cache is not None and self._angle_cache[0] is mesh:
+            return          # same mesh, same settings: colours already uploaded
+        self._overhang_key = key
+        t0 = time.perf_counter()
+        angles, top_z, areas = self._face_data(mesh)
+        t1 = time.perf_counter()
+        cls = overhang.classify(angles, self.overhang_threshold, top_z, self.overhang_plate_height)
+        rgba = overhang.vertex_colors(cls, theme.MODEL_COLOR, FaceColorMeshItem.COLOR_DTYPE)
+        t2 = time.perf_counter()
+        self.model_item.set_vertex_colors(rgba)
+        self.overhang_classes = cls
+        self.overhang_areas = overhang.band_areas(cls, areas)
+        self.overhang_timings = {"angles_s": t1 - t0, "classify_s": t2 - t1,
+                                 "faces": float(len(cls))}
+        self.overhang_legend.set_state(self.overhang_threshold, self.overhang_areas)
+        self.overhang_legend.show()
+        self._place_legend()
+        self.update()
+
     def set_tip_preview(self, length: float, base_diameter: float) -> None:
         self.tip_length = max(0.2, float(length))
         self.tip_radius = max(0.1, float(base_diameter) / 2)
@@ -288,6 +441,9 @@ class Viewport(gl.GLViewWidget):
             supports = clip_mesh(supports, z) if supports is not None else None
             raft = clip_mesh(raft, z) if raft is not None else None
         self._set_mesh(self.model_item, model, show_model)
+        self._model_shown = model if (show_model and model is not None and len(model.faces)) \
+            else None
+        self._update_overhang_colors()
         self._set_mesh(self.support_item, supports, show_supports)
         self._set_mesh(self.raft_item, raft, show_supports)
         self._update_contacts()
@@ -396,6 +552,9 @@ class Viewport(gl.GLViewWidget):
     def _place_legend(self) -> None:
         self.legend.adjustSize()
         self.legend.move(10, self.height() - self.legend.height() - 10)
+        ol = self.overhang_legend
+        ol.adjustSize()
+        ol.move(max(10, self.width() - ol.width() - 10), self.height() - ol.height() - 10)
 
     # ------------------------------------------------------------------ picking
     def mvp(self) -> np.ndarray:
@@ -598,6 +757,14 @@ class ViewportContainer(QtWidgets.QWidget):
         fit = QtWidgets.QPushButton("Fit")
         fit.clicked.connect(self.viewport.fit_view)
         bl.addWidget(fit)
+        bl.addSpacing(16)
+        # overhang colours: automatic (on while no support is generated) until the user
+        # clicks the button, then the user's choice is kept
+        self.overhang_button = QtWidgets.QPushButton("Overhangs", checkable=True)
+        self.overhang_button.clicked.connect(self._on_overhang_clicked)
+        bl.addWidget(self.overhang_button)
+        self.overhang_choice: Optional[bool] = None    # None = automatic
+        self._supports_present = False
         bl.addStretch(1)
         self.hint = QtWidgets.QLabel("Left click: add / select contact    Right click: delete    "
                                      "Drag: orbit    Shift or middle drag: pan    Wheel: zoom",
@@ -642,6 +809,7 @@ class ViewportContainer(QtWidgets.QWidget):
         lay.setSpacing(0)
         lay.addWidget(bar)
         lay.addLayout(mid, 1)
+        self._apply_overhang()
 
     BANNER_STYLE = {
         "busy": ("rgba(40,62,98,230)", "#cfe0ff", "#4f7fd0"),
@@ -675,6 +843,36 @@ class ViewportContainer(QtWidgets.QWidget):
         super().resizeEvent(ev)
         if self.banner.isVisible():
             self._place_banner()
+
+    # -- overhang colours ------------------------------------------------------------
+    def overhang_effective(self) -> bool:
+        if self.overhang_choice is not None:
+            return self.overhang_choice
+        return not self._supports_present
+
+    def _apply_overhang(self) -> None:
+        on = self.overhang_effective()
+        self.overhang_button.blockSignals(True)
+        self.overhang_button.setChecked(on)
+        self.overhang_button.blockSignals(False)
+        mode = "automatic: on until supports are generated" if self.overhang_choice is None \
+            else "your choice (View > Overhang colors: automatic to go back)"
+        self.overhang_button.setToolTip(
+            "Colour the model by overhang angle against the current Overhang angle "
+            f"(display only).\nNow {'on' if on else 'off'}, {mode}.")
+        self.viewport.set_overhang_display(on)
+
+    def _on_overhang_clicked(self, checked: bool) -> None:
+        self.set_overhang_choice(bool(checked))
+
+    def set_overhang_choice(self, choice: Optional[bool]) -> None:
+        """True / False forces the overhang colours, None makes them automatic."""
+        self.overhang_choice = choice
+        self._apply_overhang()
+
+    def set_supports_present(self, present: bool) -> None:
+        self._supports_present = bool(present)
+        self._apply_overhang()
 
     def _on_clip(self, value: int) -> None:
         h = self.viewport.scene_height()

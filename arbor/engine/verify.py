@@ -18,6 +18,9 @@ Checks (code -> meaning):
   invalid_support_mesh the merged support mesh is not a closed 2-manifold
   contacts_too_close   two active contacts closer than min_contact_distance
   invalid_model_mesh   the input model is not closed / consistently oriented (warning)
+  support_floating_region  the supports sliced alone, layer by layer like a slicer: a
+                       support part starting in the air (error) or overhanging beyond the
+                       overhang angle (warning); what rests on the model / plate is fine
   rests_on_model       informational: supports standing on the model (marks on the part)
   collision_check_skipped  model is not a valid manifold, overlap could not be measured
   geometric_only       informational reminder that checks are geometric, not a print test
@@ -184,7 +187,7 @@ def _check_tree(tree: SupportTree, params, issues):
                             model_feet[0].position.copy()))
 
 
-def _check_mesh(mesh, support_mesh, tree, contacts, params, issues):
+def _check_mesh(mesh, support_mesh, tree, contacts, params, issues, support_man=None):
     if support_mesh is None or len(getattr(support_mesh, "faces", [])) == 0:
         return
     if not support_mesh.is_watertight or not support_mesh.is_winding_consistent:
@@ -221,7 +224,7 @@ def _check_mesh(mesh, support_mesh, tree, contacts, params, issues):
     try:
         from .build import trimesh_to_manifold
         a = trimesh_to_manifold(mesh)
-        b = trimesh_to_manifold(support_mesh)
+        b = support_man if support_man is not None else trimesh_to_manifold(support_mesh)
         import manifold3d as mf
         if a.status() != mf.Error.NoError or b.status() != mf.Error.NoError:
             raise ValueError("not a manifold")
@@ -250,6 +253,266 @@ def _check_mesh(mesh, support_mesh, tree, contacts, params, issues):
                             f"Supports overlap the model by {vol:.2f} mm3 (allowed for tips: "
                             f"{budget:.2f} mm3): a branch "
                             f"{'cuts through' if severe else 'may cut into'} the part", pos))
+
+
+# ---------------------------------------------------------------------------
+# supports sliced alone, like a slicer does (support_floating_region)
+# ---------------------------------------------------------------------------
+def support_layer_regions(support_mesh, params: SupportParams, z_base: float = 0.0,
+                          model_mesh=None, model_layers=None, progress: Optional[Progress] = None,
+                          support_man=None):
+    """Slice the support mesh on the print layer grid z_i = h (i + 1/2) and compare every
+    layer with the one below, exactly like analysis.analyze does for the model: the
+    supports are printed without support of their own, so any part of them that starts
+    in the air (island) or grows beyond the printable overhang (overhang) fails.
+
+    What holds a support layer up: the support layer below, the model layer below (feet
+    and pads standing on the model; `model_layers` = analysis.layer_polygons on the same
+    grid, or the model is sliced here), the model inside the same layer (penetrating
+    tips) and the plate / raft for the first layer above z_base. Pieces smaller than
+    min_region_area are ignored, like in the model analysis.
+
+    Returns a list of dicts {kind: "island"|"overhang", z, area, polygon (shapely),
+    position (3,)} or None when the support mesh cannot be sliced. support_man: the
+    support mesh already converted to a manifold3d Manifold (optional)."""
+    import math
+    import manifold3d as mf
+    import shapely
+    from shapely.geometry import Polygon
+    from .analysis import cs_components
+    from .build import trimesh_to_manifold
+
+    if support_mesh is None or len(getattr(support_mesh, "faces", [])) == 0:
+        return []
+    sm = support_man if support_man is not None else trimesh_to_manifold(support_mesh)
+    if sm.status() != mf.Error.NoError or sm.is_empty():
+        return None
+    h = float(params.layer_height)
+    d = params.max_unsupported_overhang if params.max_unsupported_overhang > 0 else \
+        h * math.tan(math.radians(params.overhang_angle_deg))
+    min_area = float(params.min_region_area)
+    zmax = float(support_mesh.bounds[1, 2])
+    i0 = max(0, int(math.floor(z_base / h - 0.5)) + 1)      # first layer centre above z_base
+    i1 = int(math.ceil(zmax / h - 0.5))
+    if i1 <= i0:
+        return []
+
+    model_cache: dict[int, object] = {}
+    model_man = [None, False]
+
+    def model_poly(i: int):
+        """Model cross-section at layer i (shapely), empty geometry if none."""
+        if i in model_cache:
+            return model_cache[i]
+        g = None
+        if model_layers is not None and 0 <= i < len(model_layers):
+            g = model_layers[i]
+        elif model_mesh is not None and len(getattr(model_mesh, "faces", [])):
+            if not model_man[1]:
+                model_man[1] = True
+                try:
+                    mm = trimesh_to_manifold(model_mesh)
+                    model_man[0] = mm if mm.status() == mf.Error.NoError else None
+                except Exception:
+                    model_man[0] = None
+            if model_man[0] is not None:
+                ps = [p for _, p in cs_components(model_man[0].slice(float(h * (i + 0.5))))]
+                g = shapely.union_all(ps) if ps else None
+        g = g if g is not None and not g.is_empty else Polygon()
+        model_cache[i] = g
+        return g
+
+    out: list[dict] = []
+    pending: list[float] = []                  # first z of every (small) island seen
+    prev_cs = None                             # None: plate / raft below
+    prev_polys = None                          # lazily computed components of prev_cs
+    prev_label = None                          # None: every component of prev_cs is printed
+    n = i1 - i0
+    for i in range(i0, i1):
+        if progress is not None and (i - i0) % 64 == 0:
+            progress.update((i - i0) / max(n, 1), "Slicing the supports alone")
+        z = h * (i + 0.5)
+        cur = sm.slice(float(z))
+        if prev_cs is None:                    # first layer: on the plate / raft
+            prev_cs, prev_polys, prev_label = cur, None, None
+            continue
+        grown = prev_cs.offset(d, mf.JoinType.Miter, 2.0) if not prev_cs.is_empty() else prev_cs
+        unsup = cur - grown if not grown.is_empty() else cur
+        if (unsup.is_empty() or unsup.area() < 1e-9) and prev_label is None:
+            # fast path (most layers): everything rests on the printed layer below
+            prev_cs, prev_polys, prev_label = cur, None, None
+            continue
+        if prev_polys is None:
+            prev_polys = [p for _, p in cs_components(prev_cs)]
+        lab_prev = prev_label if prev_label is not None else np.full(len(prev_polys), -1, np.int64)
+        comps = cs_components(cur)
+        polys = [p for _, p in comps]
+        label = np.full(len(comps), -2, np.int64)
+        if prev_polys and polys:
+            qi, pi = shapely.STRtree(prev_polys).query(polys, predicate="intersects")
+            for a_, b_ in zip(qi, pi):
+                lb = lab_prev[b_]
+                if lb == -1:
+                    label[a_] = -1
+                elif label[a_] != -1:
+                    label[a_] = lb if label[a_] < 0 else min(label[a_], lb)
+        island_cs = []
+        for k, (cs, poly) in enumerate(comps):
+            if label[k] == -1:
+                continue
+            mp = model_poly(i - 1)
+            if not mp.is_empty and poly.intersects(mp):
+                label[k] = -1                      # stands on the model
+                continue
+            if label[k] == -2:
+                pending.append(float(z))
+                label[k] = len(pending) - 1
+            island_cs.append(cs)
+            if poly.area >= min_area:
+                out.append(_region("island", pending[label[k]], poly))
+                label[k] = -1                      # reported once, then counted as printed
+        if island_cs:
+            unsup = unsup - (mf.CrossSection.batch_boolean(island_cs, mf.OpType.Add)
+                             if len(island_cs) > 1 else island_cs[0])
+        if not unsup.is_empty() and unsup.area() >= min_area:
+            for _, poly in cs_components(unsup):
+                if poly.area < min_area:
+                    continue
+                hold = shapely.union_all([model_poly(i - 1).buffer(d), model_poly(i)])
+                rest = poly.difference(hold) if not hold.is_empty else poly
+                if rest.is_empty or rest.area < min_area:
+                    continue
+                out.append(_region("overhang", float(z), rest))
+        prev_cs, prev_polys = cur, polys
+        prev_label = label if np.any(label >= 0) else None
+    return out
+    edges = np.diff(np.concatenate([[0], cand.astype(np.int8), [0]]))
+    runs = list(zip(np.nonzero(edges == 1)[0] + i0, np.nonzero(edges == -1)[0] + i0))
+    pending: list[float] = []                  # first z of every (small) island seen
+    done = 0
+    total = int(cand.sum())
+
+    for s_, e_ in runs:
+        # state below the run: the layer under it is printed (grounded) or the plate
+        if s_ == i0:
+            prev_cs = None                     # plate / raft
+        else:
+            prev_cs = sm.slice(float(h * (s_ - 0.5)))
+        prev_polys = [p for _, p in cs_components(prev_cs)] if prev_cs is not None else []
+        prev_tree = shapely.STRtree(prev_polys) if prev_polys else None
+        prev_label = np.full(len(prev_polys), -1, np.int64)
+        for i in range(s_, e_):
+            if progress is not None and done % 64 == 0:
+                progress.update(done / max(total, 1), "Slicing the supports alone")
+            done += 1
+            z = h * (i + 0.5)
+            cur = sm.slice(float(z))
+            if prev_cs is None:                # first layer: on the plate / raft
+                polys = [p for _, p in cs_components(cur)]
+                prev_cs, prev_polys = cur, polys
+                prev_tree = shapely.STRtree(polys) if polys else None
+                prev_label = np.full(len(polys), -1, np.int64)
+                continue
+            comps = cs_components(cur)
+            polys = [p for _, p in comps]
+            label = np.full(len(comps), -2, np.int64)
+            if prev_tree is not None and polys:
+                qi, pi = prev_tree.query(polys, predicate="intersects")
+                for a_, b_ in zip(qi, pi):
+                    lb = prev_label[b_]
+                    if lb == -1:
+                        label[a_] = -1
+                    elif label[a_] != -1:
+                        label[a_] = lb if label[a_] < 0 else min(label[a_], lb)
+            island_cs = []
+            for k, (cs, poly) in enumerate(comps):
+                if label[k] == -1:
+                    continue
+                mp = model_poly(i - 1)
+                if not mp.is_empty and poly.intersects(mp):
+                    label[k] = -1                  # stands on the model
+                    continue
+                if label[k] == -2:
+                    pending.append(float(z))
+                    label[k] = len(pending) - 1
+                island_cs.append(cs)
+                if poly.area >= min_area:
+                    out.append(_region("island", pending[label[k]], poly))
+                    label[k] = -1                  # reported once, then counted as printed
+            support_cs = cur
+            if island_cs:
+                support_cs = cur - (mf.CrossSection.batch_boolean(island_cs, mf.OpType.Add)
+                                    if len(island_cs) > 1 else island_cs[0])
+            if not support_cs.is_empty() and not prev_cs.is_empty():
+                unsup = support_cs - prev_cs.offset(d, mf.JoinType.Miter, 2.0)
+                if not unsup.is_empty() and unsup.area() >= min_area:
+                    for _, poly in cs_components(unsup):
+                        if poly.area < min_area:
+                            continue
+                        hold = shapely.union_all([model_poly(i - 1).buffer(d), model_poly(i)])
+                        rest = poly.difference(hold) if not hold.is_empty else poly
+                        if rest.is_empty or rest.area < min_area:
+                            continue
+                        out.append(_region("overhang", float(z), rest))
+            prev_cs, prev_label = cur, label
+            prev_tree = shapely.STRtree(polys) if polys else None
+    return out
+
+
+def _region(kind: str, z: float, poly) -> dict:
+    c = poly.representative_point()
+    return {"kind": kind, "z": float(z), "area": float(poly.area), "polygon": poly,
+            "position": np.array([c.x, c.y, float(z)])}
+
+
+def _check_support_layers(mesh, analysis, tree, support_mesh, params, issues, progress=None,
+                          support_man=None):
+    """support_floating_region: the supports, sliced alone, must be printable layer by
+    layer (error: island starting in the air; warning: overhang beyond the angle)."""
+    z_base = float(getattr(tree, "z_base", 0.0))
+    layers = None
+    if analysis is not None and analysis.layer_polygons is not None and \
+            abs(float(analysis.layer_height) - float(params.layer_height)) < 1e-9:
+        layers = analysis.layer_polygons
+    regs = support_layer_regions(support_mesh, params, z_base, mesh, layers, progress, support_man)
+    if not regs:
+        return
+    # one issue per cluster (a feature spans several layers)
+    pos = np.array([r["position"] for r in regs])
+    link = max(1.0, 4 * params.layer_height)
+    parent = list(range(len(regs)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for a, b in cKDTree(pos).query_pairs(link):
+        if regs[a]["kind"] == regs[b]["kind"]:
+            parent[find(a)] = find(b)
+    groups: dict[int, list[int]] = {}
+    for k in range(len(regs)):
+        groups.setdefault(find(k), []).append(k)
+    ordered = sorted(groups.values(), key=lambda g: (regs[g[0]]["kind"] != "island",
+                                                      -sum(regs[k]["area"] for k in g)))
+    shown = 0
+    for g in ordered:
+        kind = regs[g[0]]["kind"]
+        area = sum(regs[k]["area"] for k in g)
+        z0 = min(regs[k]["z"] for k in g)
+        z1 = max(regs[k]["z"] for k in g)
+        p = regs[min(g, key=lambda k: regs[k]["z"])]["position"].copy()
+        if shown >= 30:
+            break
+        shown += 1
+        if kind == "island":
+            msg = (f"Support part starting in the air at z={z0:.2f} mm ({area:.2f} mm2): sliced "
+                   "without the model it has nothing below it and would print in the air")
+        else:
+            msg = (f"Support overhang beyond {params.overhang_angle_deg:.0f} deg between z={z0:.2f} "
+                   f"and {z1:.2f} mm ({area:.2f} mm2 over {len(g)} layer(s)): it may sag or fail")
+        issues.append(Issue("error" if kind == "island" else "warning",
+                            "support_floating_region", msg, p))
 
 
 def _check_model_feet(mesh, tree, params, issues):
@@ -319,7 +582,17 @@ def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Conta
     _check_model_feet(mesh, tree, params, issues)
     _check_spacing(contacts, params, issues)
     progress.update(0.55, "Checking meshes")
-    _check_mesh(mesh, support_mesh, tree, contacts, params, issues)
+    support_man = None
+    if support_mesh is not None and len(getattr(support_mesh, "faces", [])):
+        try:
+            from .build import trimesh_to_manifold
+            support_man = trimesh_to_manifold(support_mesh)   # shared by both checks
+        except Exception:
+            support_man = None
+    _check_mesh(mesh, support_mesh, tree, contacts, params, issues, support_man)
+    progress.update(0.75, "Slicing the supports alone")
+    _check_support_layers(mesh, analysis, tree, support_mesh, params, issues,
+                          progress.sub(0.75, 1.0), support_man)
     issues.append(Issue("info", "geometric_only",
                         "These checks are geometric. They do not prove the print will succeed; "
                         "turn off the slicer's own supports and inspect the preview."))
