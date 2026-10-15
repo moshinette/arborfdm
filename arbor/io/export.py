@@ -13,6 +13,18 @@
     it lies in the positive octant as recommended by the spec; the shift is returned.
   * Metadata Application=ArborFDM (+ Title, CreationDate) and namespaced
     ``arbor:`` metadata with the support parameters as JSON.
+  * Coordinates are written with 6 decimals (1 nm). Before writing, each part is
+    *welded* (:func:`weld_for_export`): vertices closer than WELD_EPS = 1e-5 mm on the
+    written values become one vertex (Core 4.1.3: "a producer SHOULD collapse vertices
+    that are very closely proximal") and the triangles that collapse (repeated index,
+    forbidden by Core 4.1.4.1) are dropped. This follows Core 4.1.3 ("SHOULD NOT include duplicate
+    vertices unless coalescing duplicates would create non-manifold edges"): the weld is
+    only kept if the result is still closed, manifold and consistently wound, otherwise
+    the part is written unchanged and a note is returned. Every action is reported in
+    ``ExportResult.notes``; the in-memory meshes are never modified.
+    Why: manifold3d (support union) returns zero-area slivers whose distinct vertices
+    share the same float32 position. Index topology is closed, but any consumer that
+    merges vertices by position (trimesh.load, most slicers) sees non-manifold edges.
 """
 from __future__ import annotations
 
@@ -48,6 +60,7 @@ class ExportResult:
     objects: list[str] = field(default_factory=list)
     n_triangles: int = 0
     layout: str = "objects"
+    notes: list[str] = field(default_factory=list)   # weld actions / warnings per part
 
 
 # ---------------------------------------------------------------------------
@@ -67,10 +80,29 @@ def _concat(meshes: MeshLike) -> trimesh.Trimesh:
     return trimesh.Trimesh(vertices=np.vstack(vs), faces=np.vstack(fs), process=False, validate=False)
 
 
-def export_stl(mesh_or_list: MeshLike, path: str | Path) -> Path:
-    """Write a binary STL (several meshes are concatenated, not united)."""
+def export_stl(mesh_or_list: MeshLike, path: str | Path, *, weld: bool = True,
+               notes: Optional[list] = None, names: Optional[Sequence[str]] = None) -> Path:
+    """Write a binary STL (several meshes are concatenated, not united).
+
+    ``weld``: each mesh is first welded at float32 precision (see :func:`weld_for_stl`)
+    so that zero-area slivers do not become non-manifold edges once a reader merges
+    vertices by position. Actions are appended to ``notes`` if given."""
     path = Path(path)
-    m = _concat(mesh_or_list)
+    meshes = [mesh_or_list] if isinstance(mesh_or_list, trimesh.Trimesh) else list(mesh_or_list)
+    if weld:
+        welded = []
+        for i, mm in enumerate(meshes):
+            if mm is None or len(mm.faces) == 0:
+                continue
+            label = names[i] if names is not None and i < len(names) else f"STL part {i + 1}"
+            w, rep = weld_for_stl(mm, label)
+            if notes is not None and (rep.applied or not rep.reason.startswith("no vertices")):
+                notes.append(rep.describe())
+            welded.append(w)
+        meshes = welded
+    if not meshes:
+        raise ValueError("Nothing to export (no triangles).")
+    m = _concat(meshes)
     if len(m.faces) == 0:
         raise ValueError("Nothing to export (no triangles).")
     tri = np.asarray(m.vertices, np.float64)[m.faces]
@@ -92,19 +124,180 @@ def export_stl(mesh_or_list: MeshLike, path: str | Path) -> Path:
 # ---------------------------------------------------------------------------
 # 3MF
 # ---------------------------------------------------------------------------
-def _mesh_xml(mesh: trimesh.Trimesh) -> str:
-    # 6 decimals in mm = 1 nm resolution
+COORD_FMT = "%.6f"     # 6 decimals in mm = 1 nm resolution
+WELD_EPS = 1e-5        # mm: vertices closer than this (on written values) are one vertex
+
+
+@dataclass
+class WeldReport:
+    name: str
+    vertices_merged: int = 0
+    faces_removed: int = 0
+    max_shift: float = 0.0     # mm, largest vertex displacement caused by the weld
+    applied: bool = False
+    reason: str = ""
+
+    def describe(self) -> str:
+        if self.applied:
+            return (f"{self.name}: merged {self.vertices_merged} vertices closer than "
+                    f"{WELD_EPS:g} mm (max shift {self.max_shift:.1e} mm) and removed "
+                    f"{self.faces_removed} collapsed zero-area triangles / zero-volume fins; "
+                    "mesh still closed and manifold.")
+        return f"{self.name}: written unchanged ({self.reason})."
+
+
+def _closed_consistent(faces: np.ndarray) -> bool:
+    """Every undirected edge used exactly twice, once in each direction."""
+    if len(faces) == 0:
+        return False
+    d = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    und = np.sort(d, axis=1)
+    _, inv, cnt = np.unique(und, axis=0, return_inverse=True, return_counts=True)
+    if np.any(cnt != 2):
+        return False
+    fwd = np.bincount(inv.ravel(), weights=(d[:, 0] < d[:, 1]), minlength=len(cnt))
+    return bool(np.all(fwd == 1))
+
+
+def _written_values(v: np.ndarray) -> np.ndarray:
+    """Coordinates exactly as a reader will parse them back from the 3MF (6 decimals),
+    with -0.0 normalised to 0.0 (a tiny negative value would otherwise be written
+    "-0.000000", a different string for the same number)."""
+    txt = np.char.mod(COORD_FMT, np.asarray(v, np.float64))
+    return txt.astype(np.float64) + 0.0
+
+
+def _format_vertices(v: np.ndarray) -> np.ndarray:
+    """(n, 3) array of the exact strings written to the file."""
+    return np.char.mod(COORD_FMT, _written_values(v))
+
+
+def _clusters(wv: np.ndarray, eps: float) -> tuple[np.ndarray, np.ndarray]:
+    """Single-linkage clusters of points closer than ``eps``. Returns (first, inv): the
+    lowest index of each cluster (its representative) and the cluster of each point.
+    Points of different clusters are more than ``eps`` apart, so no reader merging by
+    position with a smaller tolerance can merge two representatives."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    from scipy.spatial import cKDTree
+    n = len(wv)
+    pairs = cKDTree(wv).query_pairs(eps, output_type="ndarray")
+    if len(pairs) == 0:
+        idx = np.arange(n)
+        return idx, idx
+    g = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    _, labels = connected_components(g, directed=False)
+    # relabel by first appearance so that representatives keep the original order
+    _, first, inv = np.unique(labels, return_index=True, return_inverse=True)
+    order = np.argsort(first)
+    rank = np.empty_like(order)
+    rank[order] = np.arange(len(order))
+    return first[order], rank[inv.ravel()]
+
+
+def _weld_core(wv: np.ndarray, f: np.ndarray, rep: WeldReport, what: str
+               ) -> tuple[Optional[np.ndarray], np.ndarray]:
+    """Weld the vertices ``wv`` (written values) closer than WELD_EPS. Returns (source
+    vertex indices, new faces), or (None, original faces) when nothing is merged;
+    ``rep`` is filled in."""
+    first, inv = _clusters(wv, WELD_EPS)
+    n_coinc = len(wv) - len(first)
+    if n_coinc == 0:
+        rep.reason = f"no vertices closer than {WELD_EPS:g} mm at {what}"
+        return None, f
+    if not _closed_consistent(f):
+        rep.reason = (f"{n_coinc} vertices closer than {WELD_EPS:g} mm at {what}; input mesh is "
+                      "not closed/consistently wound, so it is not welded")
+        return None, f
+    nf = inv[f]
+    ok = (nf[:, 0] != nf[:, 1]) & (nf[:, 1] != nf[:, 2]) & (nf[:, 0] != nf[:, 2])
+    n_collapsed = int((~ok).sum())
+    nf = nf[ok]
+    # Collapsing a sliver can leave two triangles on the same 3 vertices with opposite
+    # orientation (a zero-thickness fin, zero volume). Remove such pairs only.
+    n_fins = 0
+    if len(nf):
+        srt = np.sort(nf, axis=1)
+        _, finv, fcnt = np.unique(srt, axis=0, return_inverse=True, return_counts=True)
+        finv = finv.ravel()
+        if np.any(fcnt > 1):
+            r = np.argmin(nf, axis=1)          # rotate so the smallest index is first
+            rolled = np.stack([nf[np.arange(len(nf)), (r + k) % 3] for k in range(3)], axis=1)
+            positive = rolled[:, 1] < rolled[:, 2]
+            pos_cnt = np.bincount(finv, weights=positive, minlength=len(fcnt))
+            fin_group = (fcnt == 2) & (pos_cnt == 1)
+            drop = fin_group[finv]
+            n_fins = int(drop.sum())
+            nf = nf[~drop]
+    used = np.zeros(len(first), bool)
+    used[nf.ravel()] = True
+    new_f = (np.cumsum(used) - 1)[nf]
+    if not _closed_consistent(new_f):
+        rep.reason = (f"{n_coinc} vertices closer than {WELD_EPS:g} mm at {what}, but merging them "
+                      "would create open or non-manifold edges (touching geometry); readers that "
+                      "merge by position may report non-manifold edges")
+        return None, f
+    src = first[used]
+    rep.vertices_merged = int(len(wv) - len(src))
+    rep.faces_removed = n_collapsed + n_fins
+    rep.max_shift = float(np.max(np.linalg.norm(wv - wv[first[inv]], axis=1)))
+    rep.applied = True
+    return src, new_f
+
+
+def weld_for_export(mesh: trimesh.Trimesh, name: str = "mesh"
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, WeldReport]:
+    """Return (vertex strings, vertices, faces, report) to write in a 3MF for ``mesh``.
+
+    Vertices closer than WELD_EPS (on the values actually written) are merged into their
+    cluster's first vertex; triangles that then repeat an index, and opposite-facing
+    duplicate pairs (zero-volume fins), are dropped. Applied only when the input is
+    closed and consistently wound and the result still is, so no non-manifold edge can be
+    created (3MF Core 4.1.3). The input mesh is not modified."""
     v = np.asarray(mesh.vertices, np.float64)
-    f = np.asarray(mesh.faces, np.int64)
-    xs = np.char.mod('<vertex x="%.6f" ', v[:, 0])
-    ys = np.char.mod('y="%.6f" ', v[:, 1])
-    zs = np.char.mod('z="%.6f"/>', v[:, 2])
+    f = np.asarray(mesh.faces, np.int64).reshape(-1, 3)
+    rep = WeldReport(name)
+    if len(v) == 0 or len(f) == 0:
+        rep.reason = "empty"
+        return np.char.mod(COORD_FMT, v.reshape(-1, 3)), v, f, rep
+    wv = _written_values(v)
+    txt = np.char.mod(COORD_FMT, wv)
+    src, nf = _weld_core(wv, f, rep, "write precision")
+    if src is None:
+        return txt, v, f, rep
+    return txt[src], v[src], nf, rep
+
+
+def weld_for_stl(mesh: trimesh.Trimesh, name: str = "mesh") -> tuple[trimesh.Trimesh, WeldReport]:
+    """Same as :func:`weld_for_export` on float32 values (what a binary STL stores)."""
+    v = np.asarray(mesh.vertices, np.float64)
+    f = np.asarray(mesh.faces, np.int64).reshape(-1, 3)
+    rep = WeldReport(name)
+    if len(v) == 0 or len(f) == 0:
+        rep.reason = "empty"
+        return mesh, rep
+    wv = v.astype(np.float32).astype(np.float64) + 0.0
+    src, nf = _weld_core(wv, f, rep, "float32 precision")
+    if src is None:
+        return mesh, rep
+    return trimesh.Trimesh(vertices=v[src], faces=nf, process=False, validate=False), rep
+
+
+def _mesh_xml_from(txt: np.ndarray, f: np.ndarray) -> str:
+    xs = np.char.add(np.char.add('<vertex x="', txt[:, 0]), '" ')
+    ys = np.char.add(np.char.add('y="', txt[:, 1]), '" ')
+    zs = np.char.add(np.char.add('z="', txt[:, 2]), '"/>')
     vert = "".join(np.char.add(np.char.add(xs, ys), zs).tolist())
     a = np.char.mod('<triangle v1="%d" ', f[:, 0])
     b = np.char.mod('v2="%d" ', f[:, 1])
     c = np.char.mod('v3="%d"/>', f[:, 2])
     tris = "".join(np.char.add(np.char.add(a, b), c).tolist())
     return f"<mesh><vertices>{vert}</vertices><triangles>{tris}</triangles></mesh>"
+
+
+def _mesh_xml(mesh: trimesh.Trimesh) -> str:
+    """Mesh element without welding (kept for callers that need the raw mesh)."""
+    return _mesh_xml_from(_format_vertices(mesh.vertices), np.asarray(mesh.faces, np.int64))
 
 
 def _content_types() -> bytes:
@@ -123,9 +316,10 @@ def _rels() -> bytes:
 def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trimesh.Trimesh] = None,
                raft: Optional[trimesh.Trimesh] = None, params=None, model_name: str = "model",
                *, layout: str = "objects", positive_octant: bool = True,
-               title: Optional[str] = None) -> ExportResult:
+               title: Optional[str] = None, weld: bool = True) -> ExportResult:
     """Write model (+ supports, + raft) to a 3MF package. Input meshes are in plate
-    coordinates (mm, z up) and are not modified."""
+    coordinates (mm, z up) and are not modified. ``weld``: see :func:`weld_for_export`
+    (actions reported in ``ExportResult.notes``)."""
     if layout not in ("objects", "components"):
         raise ValueError("layout must be 'objects' or 'components'")
     path = Path(path)
@@ -161,10 +355,17 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
         out.write(f'<metadata name="arbor:support_params">{escape(json.dumps(pdict, sort_keys=True))}</metadata>\n')
     out.write("<resources>\n")
     names = []
+    notes: list[str] = []
+    n_tri = 0
     for i, (name, m) in enumerate(parts, start=1):
         names.append(name)
+        txt, _wv, wf, rep = weld_for_export(m, name) if weld else (
+            _format_vertices(m.vertices), None, np.asarray(m.faces, np.int64), WeldReport(name))
+        if rep.applied or (weld and rep.reason and not rep.reason.startswith("no vertices")):
+            notes.append(rep.describe())
+        n_tri += len(wf)
         out.write(f'<object id="{i}" type="model" name={quoteattr(name)}>')
-        out.write(_mesh_xml(m))
+        out.write(_mesh_xml_from(txt, wf))
         out.write("</object>\n")
     if layout == "components":
         pid = len(parts) + 1
@@ -188,7 +389,7 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
         zf.writestr("_rels/.rels", _rels())
         zf.writestr(MODEL_PATH, out.getvalue().encode("utf-8"))
     tmp.replace(path)
-    return ExportResult(path, offset, names, int(sum(len(m.faces) for _, m in parts)), layout)
+    return ExportResult(path, offset, names, int(n_tri), layout, notes)
 
 
 # ---------------------------------------------------------------------------

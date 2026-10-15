@@ -112,11 +112,12 @@ def cube(size: float = 20.0) -> trimesh.Trimesh:
     return _to_trimesh(_box((-h, -h, 0), (h, h, size)), kind="cube", size=size)
 
 
-def sphere_on_plate(radius: float = 10.0, plate: float = 2.0, sink: float = 2.0,
+def sphere_on_plate(radius: float = 10.0, plate: float = 2.0, sink: float = 1.0,
                     seg: int = 96) -> trimesh.Trimesh:
-    """A sphere sitting on a thin square plate (30 % sunk into it).
+    """A sphere sitting on a thin square plate, sunk 1 mm into it (64 deg slope at the joint).
 
-    The lower hemisphere outside the plate contact circle overhangs.
+    The lower band of the sphere (below ~55 deg from vertical) overhangs. With sink=2 the
+    slope at the joint is only 53 deg and nothing needs support at a 55 deg threshold.
     """
     w = radius * 1.5
     cz = plate + radius - sink

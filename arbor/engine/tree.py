@@ -196,15 +196,21 @@ class ModelGrid:
         return bool(np.any((lo <= p[2]) & (hi >= p[2])))
 
     def top_below(self, xy, z: float) -> Optional[float]:
-        """Highest model surface at or below z in the column of xy (None if none)."""
+        """Highest upward facing model surface at or below z in the column of xy.
+
+        None if there is none, or if (xy, z) itself lies inside the material: a point
+        beside or inside a wall has no surface "below" it to stand on (returning z there
+        used to put model feet on the side of vertical walls)."""
         i, j, ok = self.cell_index(np.asarray(xy, float)[:2])
         if not ok[0]:
             return None
         lo, hi = self._intervals(int(j[0] * self.nx + i[0]))
-        m = lo <= z + 1e-6
+        if np.any((lo < z - 1e-6) & (hi > z + 1e-6)):
+            return None
+        m = hi <= z + 1e-6
         if not m.any():
             return None
-        return float(min(hi[m].max(), z))
+        return float(hi[m].max())
 
     def footprint_below(self, z: float) -> np.ndarray:
         """(ny, nx) bool: cells where the model has material below height z."""
@@ -335,7 +341,23 @@ class _Router:
 
     # -- setup ----------------------------------------------------------------
     def run(self) -> None:
-        P, tree = self.P, self.tree
+        P = self.P
+        prog = self.progress
+        self._prepare()
+        prog.update(0.4, "Tips")
+        self._make_tips()
+        self._route()
+        prog.update(0.9, "Braces")
+        self._cleanup()
+        if P.braces_enabled:
+            self._braces()
+        if P.raft_enabled:
+            self._raft_keepout()
+        prog.update(1.0, "Tree done")
+
+    def _prepare(self) -> None:
+        """Model grid, slab distance fields and reachability (no tree node created)."""
+        P = self.P
         prog = self.progress
         prog.update(0.0, "Preparing model grid")
         cpos = np.array([c.position for c in self.contacts], float)
@@ -351,16 +373,6 @@ class _Router:
         self.n_slabs = n_slabs
         prog.update(0.3, "Reachability")
         self._reachability()
-        prog.update(0.4, "Tips")
-        self._make_tips()
-        self._route()
-        prog.update(0.9, "Braces")
-        self._cleanup()
-        if P.braces_enabled:
-            self._braces()
-        if P.raft_enabled:
-            self._raft_keepout()
-        prog.update(1.0, "Tree done")
 
     # distance of xy points to the model in slab k (vectorized, k scalar)
     def mdist(self, k: int, xy: np.ndarray) -> np.ndarray:
@@ -372,6 +384,15 @@ class _Router:
         i, j, ok = self.grid.cell_index(xy)
         d = self.dist[k, j, i].astype(np.float64)
         d[~ok] = BIG
+        return d
+
+    def mdist2(self, k: int, xy: np.ndarray) -> np.ndarray:
+        """Distance to the model around a node standing at level k: both the slab above
+        it (segment from level k + 1) and the slab below it (segment to level k - 1) are
+        touched by the node's radius, so both must keep the clearance."""
+        d = self.mdist(k, xy)
+        if k >= 1:
+            d = np.minimum(d, self.mdist(k - 1, xy))
         return d
 
     def reach(self, k: int, xy: np.ndarray) -> np.ndarray:
@@ -401,7 +422,8 @@ class _Router:
         D = np.empty(self.dist.shape, bool)
         D[0] = self.dist[0] >= c
         for k in range(1, self.n_slabs):
-            F = self.dist[k] >= c
+            # a node at level k touches slab k (above) and slab k - 1 (below)
+            F = np.minimum(self.dist[k], self.dist[k - 1]) >= c
             if F.all():
                 D[k] = True
                 continue
@@ -421,13 +443,8 @@ class _Router:
             n = n / ln if ln > 1e-12 else np.array([0.0, 0.0, -1.0])
             tip_d = c.tip_diameter if c.tip_diameter else P.tip_diameter
             tip_r = tip_d / 2
-            u = tip_direction(n, P.branch_angle_deg)
+            u = self._tip_dir(pos, n)
             base = pos + u * P.tip_length
-            if self.grid.inside(base) or self.mdist(int((base[2] - zb) // dz), base[:2])[0] < 1e-3:
-                u2 = tip_direction(n, P.branch_angle_deg, extra_tilt=True)
-                b2 = pos + u2 * P.tip_length
-                if not self.grid.inside(b2):
-                    u, base = u2, b2
             if P.tip_shape == "ball":
                 tip_pos = pos + n * (tip_r - P.tip_penetration)
             else:
@@ -458,6 +475,50 @@ class _Router:
             move = (base[2] - (zb + kb * dz)) * self.tan
             self.pending.append((kb, b.id, move, max(self.r_min, self.r_tipbase)))
         self.pending.sort(key=lambda t: -t[0])
+
+    def _base_clearance(self, pos: np.ndarray, u: np.ndarray) -> float:
+        """Horizontal clearance from the model of a tip base pos + u * tip_length
+        (-1 if the tip base or the tip axis is inside the model)."""
+        P, zb, dz = self.P, self.zb, self.dz
+        base = pos + u * P.tip_length
+        if base[2] < zb:
+            return -1.0
+        for s in (0.5, 0.75, 1.0):
+            if self.grid.inside(pos + u * (s * P.tip_length)):
+                return -1.0
+        k = int(math.floor((base[2] - zb) / dz))
+        return float(self.mdist2(k, base[:2])[0])
+
+    def _tip_dir(self, pos: np.ndarray, n: np.ndarray) -> np.ndarray:
+        """Tip axis direction. Default: tip_direction() (down, tilted towards the surface
+        normal). When that tip base lacks the clearance a branch needs to leave towards
+        the plate (contact next to a wall, a leg, the inner corner of an arm), the tip is
+        tilted (up to branch_angle) towards the side with the most room. Without this a
+        contact 0.5 mm from a wall starts in a column where no branch fits and ends up
+        landing on the model (or crossing it)."""
+        P = self.P
+        u0 = tip_direction(n, P.branch_angle_deg)
+        want = P.xy_clearance + self.r_min
+        c0 = self._base_clearance(pos, u0)
+        if c0 >= want:
+            return u0
+        best_u, best_s = u0, (min(c0, want) + 0.05 if c0 >= 0 else -np.inf)
+        cands = [tip_direction(n, P.branch_angle_deg, extra_tilt=True)]
+        amax = math.radians(P.branch_angle_deg)
+        for frac in (0.5, 1.0):
+            th = frac * amax
+            for az in np.arange(16) * (2 * math.pi / 16):
+                cands.append(np.array([math.sin(th) * math.cos(az), math.sin(th) * math.sin(az),
+                                       -math.cos(th)]))
+        for u in cands:
+            c = self._base_clearance(pos, u)
+            if c < 0:
+                continue
+            # prefer clearance, then the direction closest to the default one
+            s = min(c, want) + 0.05 * float(np.dot(u, u0))
+            if s > best_s + 1e-9:
+                best_u, best_s = u, s
+        return best_u
 
     def _foot_r(self, pos, r_node) -> float:
         """Foot disk radius: foot_diameter / 2, shrunk to keep 0.2 mm from the model
@@ -519,7 +580,7 @@ class _Router:
         C = len(_PATTERN)
         cand = xy[:, None, :] + _PATTERN[None, :, :] * move[:, None, None]
         flat = cand.reshape(-1, 2)
-        md = self.mdist(j, flat).reshape(N, C)
+        md = self.mdist2(j, flat).reshape(N, C)
         mid = (0.5 * (cand + xy[:, None, :])).reshape(-1, 2)
         md_mid = self.mdist(j, mid).reshape(N, C)
         reach = self.reach(j, flat).reshape(N, C)
@@ -586,7 +647,7 @@ class _Router:
             if c is None:
                 continue
             rr = self._merged_radius(r_next[mem])
-            mdc = self.mdist(j, c)[0]
+            mdc = self.mdist2(j, c)[0]
             if mdc < self.r_min + self.hard:
                 continue
             if plate_ok[mem].any() and not self.reach(j, c)[0]:
@@ -602,7 +663,7 @@ class _Router:
             if len(mem) > 1:
                 c = cen[root]
                 rr = self._merged_radius(r_next[mem])
-                mdc = self.mdist(j, c)[0]
+                mdc = self.mdist2(j, c)[0]
                 reff = max(self.r_min, min(rr, mdc - self.hard))
                 node = tree.add([c[0], c[1], zj], reff, kind_level or NodeKind.TRUNK)
                 for m_ in mem:
@@ -615,7 +676,8 @@ class _Router:
             if not plate_ok[a] and P.allow_on_model:
                 topz = self.grid.top_below(xy[a], pos[a, 2])
                 land_len = P.tip_length + 2 * rn[a]
-                if topz is not None and pos[a, 2] - topz <= land_len + dz:
+                if topz is not None and pos[a, 2] - topz <= land_len + dz and \
+                        self._land_path_clear(nid, xy[a], pos[a, 2], topz):
                     self._land(nid, xy[a], pos[a, 2], topz, rn[a])
                     continue
             ok = hard_ok[a]
@@ -636,7 +698,7 @@ class _Router:
             best = float(score.min())
             if lt > 1e-9:
                 qt = xy[a] + t * min(1.0, move[a] / lt)
-                mdt = self.mdist(j, qt)[0]
+                mdt = self.mdist2(j, qt)[0]
                 mdm = self.mdist(j, 0.5 * (qt + xy[a]))[0]
                 if mdt >= self.r_min + self.hard and mdm >= 0.5 * self.r_min and \
                         (not plate_ok[a] or self.reach(j, qt)[0]):
@@ -644,7 +706,7 @@ class _Router:
                         20.0 * max(0.0, r_next[a] + P.xy_clearance - mdt) ** 2 + 0.01 * min(lt, move[a])
                     if st <= best:
                         q = qt
-            mdq = self.mdist(j, q)[0]
+            mdq = self.mdist2(j, q)[0]
             reff = max(self.r_min, min(r_next[a], mdq - self.hard))
             is_trunk = merged[a] or r_next[a] >= self.r_trunk - 1e-9
             kind = kind_level or (NodeKind.TRUNK if is_trunk else NodeKind.BRANCH)
@@ -697,6 +759,34 @@ class _Router:
         new_r.append(r_nom)
         new_merged.append(merged)
 
+    def _land_path_clear(self, nid: int, xy, z: float, topz: float) -> bool:
+        """Is the landing path of node nid (at (node xy, z)) to the surface point
+        (xy, topz) free of the model? The part above topz + tip_length (branch from the node
+        to the tip base) must keep `hard` clearance with its interpolated radius; the
+        tip itself touches the surface by design and is not tested. A tilted landing
+        must also respect the branch angle."""
+        P, zb, dz = self.P, self.zb, self.dz
+        node = self.tree.nodes[nid]
+        p0 = np.array([node.position[0], node.position[1], z])
+        z1 = topz + P.tip_length
+        off = float(np.linalg.norm(np.asarray(xy, float) - p0[:2]))
+        if off > max(z - topz - 0.5 * P.tip_length, 0.0) * self.tan + 1e-6:
+            return False
+        if z - topz <= P.tip_length + 0.2:
+            return True
+        p1 = np.array([xy[0], xy[1], z1])
+        r0, r1 = float(node.radius), max(self.r_min, self.r_tipbase)
+        n = max(2, int(math.ceil((z - z1) / (0.5 * dz))) + 1)
+        for t in np.linspace(0.0, 1.0, n):
+            q = p0 + t * (p1 - p0)
+            k = int(math.floor((q[2] - zb) / dz + 1e-9))
+            # slab of the sample and the one below; at the tip base only the slab above
+            # it (below is the tip, which reaches the surface by design)
+            d = self.mdist(k, q[:2])[0] if t >= 1.0 - 1e-9 else self.mdist2(k, q[:2])[0]
+            if d < (r0 + t * (r1 - r0)) + self.hard - 1e-9:
+                return False
+        return True
+
     def _land(self, nid: int, xy, z: float, topz: float, r_nom: float) -> None:
         P, tree = self.P, self.tree
         parent_id = nid
@@ -711,23 +801,29 @@ class _Router:
         self.landed.append(foot.id)
 
     def _blocked(self, nid: int, xy, z: float, r_nom: float) -> None:
-        """No valid position below: land on the model if allowed, else fail."""
+        """No valid position below: land on the model if allowed, else fail.
+
+        Landing spots are upward facing surfaces in the node's column or in a disc around
+        it, reachable within the branch angle by a path that does not cross the model
+        (a straight drop used to cut through legs / arms standing between the node and
+        the surface below). The highest such surface (shortest support) wins."""
         if self.P.allow_on_model:
-            topz = self.grid.top_below(xy, z)
-            if topz is None:
-                # the blocking model is beside the column: search the disc for material
-                best = None
-                for off in _PATTERN[1:] * (self.dz * self.tan + 2 * r_nom):
-                    t = self.grid.top_below(xy + off, z)
-                    if t is not None and (best is None or t > best[0]):
-                        best = (t, xy + off)
-                if best is not None:
-                    self._land(nid, best[1], z, best[0], r_nom)
+            xy = np.asarray(xy, float)
+            R = self.dz * self.tan + 2 * r_nom
+            spots = []
+            for f in (0.0, 0.5, 1.0, 2.0):
+                for off in (_PATTERN * (R * f) if f > 0 else _PATTERN[:1]):
+                    q = xy + off
+                    t = self.grid.top_below(q, z)
+                    if t is not None and t > self.zb + 1e-6:
+                        spots.append((-t, float(np.linalg.norm(off)), q, t))
+            spots.sort(key=lambda s: (s[0], s[1]))
+            for _, _, q, t in spots:
+                if self._land_path_clear(nid, q, z, t):
+                    self._land(nid, q, z, t, r_nom)
                     return
-            else:
-                self._land(nid, xy, z, topz, r_nom)
-                return
-            self.fail_nodes[nid] = "blocked by the model, no landing surface found"
+            self.fail_nodes[nid] = ("blocked by the model, no landing surface reachable "
+                                    "without crossing the model")
         else:
             self.fail_nodes[nid] = ("cannot reach the build plate within the branch angle "
                                     "and supports on the model are disabled")

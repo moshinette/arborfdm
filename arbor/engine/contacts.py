@@ -7,12 +7,17 @@ accepted contact already covers them):
   1. one mandatory contact per island (an island without support prints in the air)
   2. low points (local Z minima: arm tips, chin, ...)
   3. corners of flat overhangs
-  4. rows along hanging edges, spacing edge_spacing / contact_density
+  4. rows along hanging edges: segments are chained into polylines (cut at
+     turns > EDGE_BREAK_DEG) and sampled evenly, ends included, with a gap
+     <= edge_spacing / contact_density (independent of the tessellation)
   5. island fill + overhang fill from the sliced regions, hex grid at
      contact_spacing / contact_density (thin slope strips are sampled along
      their outline instead)
-  6. face mask fill: downward faces not yet covered (catches slopes whose
-     per-layer strips fell under min_region_area)
+  6. residual fill: a global XY lattice lifted on the overhanging faces; any
+     sample farther than the contact spacing from every contact gets one
+     (catches slopes whose per-layer strips fell under min_region_area)
+
+Samples below one layer height lie on the plate and are never kept.
 
 Coverage rule: a candidate is skipped when an accepted contact lies within
 min_contact_distance (any kind) or within the coverage radius of its kind:
@@ -56,6 +61,8 @@ ROUGH_THRESHOLD = 0.02
 ROUGH_GAIN = 0.02
 DETAIL_RADIUS = 0.4
 ISLAND_Z_SEARCH = 3.0
+EDGE_BREAK_DEG = 45.0      # a hanging edge polyline is cut where it turns more than this
+RESIDUAL_PITCH = 0.2       # lattice pitch of the residual check, fraction of contact spacing
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +242,133 @@ def _outline_samples(poly, s: float) -> np.ndarray:
     return np.concatenate(out) if out else np.zeros((0, 2))
 
 
+def _edge_polylines(E: np.ndarray, break_deg: float = EDGE_BREAK_DEG) -> list[np.ndarray]:
+    """Chain hanging edge segments (K,2,3) into polylines (list of (n,3) arrays).
+
+    Segments sharing an endpoint are joined; a polyline is cut at branch points
+    (degree != 2) and at turns sharper than break_deg (corners), so the result
+    depends on the geometry of the edge, not on how many mesh segments it has.
+    Closed loops are returned with their first point repeated at the end."""
+    if len(E) == 0:
+        return []
+    ends = E.reshape(-1, 3)
+    key = np.round(ends / 1e-6).astype(np.int64)
+    uniq, inv = np.unique(key, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
+    nodes = np.zeros((len(uniq), 3))
+    nodes[inv] = ends
+    seg = inv.reshape(-1, 2)
+    seg = seg[seg[:, 0] != seg[:, 1]]
+    if len(seg) == 0:
+        return []
+    seg = np.unique(np.sort(seg, axis=1), axis=0)
+    adj: dict[int, list[int]] = {}
+    for a, b in seg:
+        adj.setdefault(int(a), []).append(int(b))
+        adj.setdefault(int(b), []).append(int(a))
+    cos_b = math.cos(math.radians(break_deg))
+    brk = set()
+    for k, nb in adj.items():
+        if len(nb) != 2:
+            brk.add(k)
+            continue
+        d1 = nodes[k] - nodes[nb[0]]
+        d2 = nodes[nb[1]] - nodes[k]
+        n1, n2 = np.linalg.norm(d1), np.linalg.norm(d2)
+        if n1 > 0 and n2 > 0 and float(d1 @ d2) / (n1 * n2) < cos_b:
+            brk.add(k)
+    used: set[tuple[int, int]] = set()
+
+    def walk(start: int, nxt: int) -> list[int]:
+        chain = [start]
+        prev, cur = start, nxt
+        while True:
+            used.add((min(prev, cur), max(prev, cur)))
+            chain.append(cur)
+            if cur in brk or cur == start:
+                return chain
+            cand = [n for n in adj[cur] if (min(cur, n), max(cur, n)) not in used]
+            if not cand:
+                return chain
+            prev, cur = cur, cand[0]
+
+    out = []
+    for s in sorted(brk):                     # open chains, deterministic order
+        for n in sorted(adj[s]):
+            if (min(s, n), max(s, n)) not in used:
+                out.append(nodes[walk(s, n)])
+    for s in sorted(adj):                     # remaining smooth closed loops
+        for n in sorted(adj[s]):
+            if (min(s, n), max(s, n)) not in used:
+                out.append(nodes[walk(s, n)])
+    return out
+
+
+def _sample_polyline(pl: np.ndarray, step: float):
+    """Evenly spaced samples along a polyline: ends included, gap <= step.
+    Returns (points (n,3), XY tangent (n,2), actual spacing)."""
+    d = np.diff(pl, axis=0)
+    sl = np.linalg.norm(d, axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(sl)])
+    L = float(cum[-1])
+    closed = len(pl) > 2 and np.linalg.norm(pl[0] - pl[-1]) < 1e-9
+    if L <= 1e-9:
+        return pl[:1].copy(), np.zeros((1, 2)), 0.0
+    if L < 0.5 * step and not closed:
+        t = np.array([0.5 * L])
+        gap = L
+    else:
+        n = max(1, int(math.ceil(L / step - 1e-9)))
+        t = np.arange(n + 1) * (L / n)
+        if closed:
+            t = t[:-1]
+        gap = L / n
+    j = np.clip(np.searchsorted(cum, t, side="right") - 1, 0, len(sl) - 1)
+    u = (t - cum[j]) / np.maximum(sl[j], 1e-12)
+    pts = pl[j] + u[:, None] * d[j]
+    return pts, d[j, :2], gap
+
+
+def _lattice_on_faces(v: np.ndarray, f: np.ndarray, ids: np.ndarray, g: float,
+                      max_points: int = 4_000_000):
+    """Points of the global XY lattice (pitch g, anchored at the origin) that fall
+    inside the XY projection of the given faces, lifted onto each face plane.
+
+    The lattice does not depend on the triangulation: the same surface gives the
+    same samples whatever its tessellation. Returns (points (N,3), face ids (N,))."""
+    if len(ids) == 0:
+        return np.zeros((0, 3)), np.zeros(0, dtype=np.int64)
+    tri = v[f[ids]]
+    lo = np.ceil(tri[:, :, :2].min(axis=1) / g - 1e-9).astype(np.int64)
+    hi = np.floor(tri[:, :, :2].max(axis=1) / g + 1e-9).astype(np.int64)
+    nx = np.maximum(hi[:, 0] - lo[:, 0] + 1, 0)
+    ny = np.maximum(hi[:, 1] - lo[:, 1] + 1, 0)
+    cnt = nx * ny
+    if cnt.sum() > max_points:          # pathological input: coarser lattice
+        return _lattice_on_faces(v, f, ids, g * math.sqrt(cnt.sum() / max_points), max_points)
+    k = np.repeat(np.arange(len(ids)), cnt)
+    if len(k) == 0:
+        return np.zeros((0, 3)), np.zeros(0, dtype=np.int64)
+    r = np.arange(len(k)) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    nyk = np.maximum(ny[k], 1)
+    x = (lo[k, 0] + r // nyk) * g
+    y = (lo[k, 1] + r % nyk) * g
+    a = tri[k, 0]
+    e1 = tri[k, 1] - a
+    e2 = tri[k, 2] - a
+    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    ok = np.abs(det) > 1e-14
+    det = np.where(ok, det, 1.0)
+    px, py = x - a[:, 0], y - a[:, 1]
+    u = (px * e2[:, 1] - py * e2[:, 0]) / det
+    w = (e1[:, 0] * py - e1[:, 1] * px) / det
+    eps = 1e-9
+    inside = ok & (u >= -eps) & (w >= -eps) & (u + w <= 1 + eps)
+    z = a[:, 2] + u * e1[:, 2] + w * e2[:, 2]
+    pts = np.column_stack([x, y, z])[inside]
+    return pts, ids[k[inside]]
+
+
 def _vertex_normals(v, f, fn, area):
     w = fn * area[:, None]
     vn = np.zeros((len(v), 3))
@@ -386,6 +520,11 @@ class _Placer:
 
     def offer(self, pos, normal, reason: ContactReason, note: str, radius: float) -> bool:
         p = np.asarray(pos, float)
+        if p[2] < self.h:
+            # lies on the build plate (first layer): printed on the plate, no
+            # support needed (e.g. the end of an edge that starts on the plate)
+            self.stats["on_plate_skipped"] = self.stats.get("on_plate_skipped", 0) + 1
+            return False
         j = self.cov.nearest_within(p, max(radius, self.dmin))
         if j >= 0:
             self.stats["skipped_covered"] += 1
@@ -524,17 +663,23 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
                     f"corner of a flat overhang at z={corners[k, 2]:.2f} mm", radius=P.dmin)
 
     if len(E):
-        seg_len = np.linalg.norm(E[:, 1] - E[:, 0], axis=1)
-        step = 0.5 * P.e
-        n = np.maximum(1, np.ceil(seg_len / step).astype(int))
-        si = np.repeat(np.arange(len(E)), n)
-        t = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n) + 0.5) / np.repeat(n, n)
-        base = E[si, 0] + t[:, None] * (E[si, 1] - E[si, 0])
-        dvec = (E[si, 1] - E[si, 0])[:, :2]
+        # the mesh segments are chained into geometric polylines first, then
+        # sampled evenly (gap <= edge spacing, ends included): the number and
+        # position of edge contacts no longer depend on the tessellation
+        base_l, dir_l, rad_l = [], [], []
+        for pl in _edge_polylines(E):
+            pts, tan, gap = _sample_polyline(pl, P.e)
+            base_l.append(pts)
+            dir_l.append(tan)
+            # own samples must survive (gap may be < r_e); earlier contacts
+            # (corners, low points) still cover their neighbourhood
+            rad_l.append(np.full(len(pts), max(P.dmin, min(P.r_e, 0.9 * gap)) if len(pts) > 1 else P.r_e))
+        base = np.concatenate(base_l)
+        dvec = np.concatenate(dir_l)
+        rad = np.concatenate(rad_l)
         perp = np.column_stack([-dvec[:, 1], dvec[:, 0]])
         perp /= np.maximum(np.linalg.norm(perp, axis=1, keepdims=True), 1e-12)
-        keep = P.prefilter(base, P.r_e - tip_r)
-        base, perp = base[keep], perp[keep]
+        P.stats["edge_polylines"] = len(base_l)
         pos, fid = inset_project(base, perp)
         pos, fid = P.avoid_details(pos, fid, min(0.25 * P.e, 0.6))
         nrm = P.normal_of(fid)
@@ -542,7 +687,7 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
             if k % 2000 == 0:
                 progress.update(0.3 + 0.2 * k / len(pos), "Edge contacts")
             P.offer(pos[k], nrm[k], ContactReason.EDGE,
-                    f"along a hanging edge at z={base[k, 2]:.2f} mm", radius=P.r_e)
+                    f"along a hanging edge at z={base[k, 2]:.2f} mm", radius=rad[k])
 
     # ---- 5. fill islands and overhang regions ------------------------------
     progress.update(0.5, "Filling overhang areas")
@@ -591,15 +736,47 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
         comp_area = np.bincount(labels, weights=P.area[ids])
         big = comp_area[labels] >= params.min_region_area
         ids = ids[big]
+        labels = labels[big]
         if len(ids):
-            cen = P.v[P.f[ids]].mean(axis=1)
-            cell = P.r_s / math.sqrt(3)
-            key = np.floor(cen / cell).astype(np.int64)
-            _, first = np.unique(key, axis=0, return_index=True)
-            first = np.sort(first)
-            cand, cf = cen[first], ids[first]
-            sel = P.prefilter(cand, P.r_s, np.argsort(cand[:, 2], kind="stable"))
-            cand, cf = cand[sel], cf[sel]
+            # Residual check on a global XY lattice (pitch RESIDUAL_PITCH x spacing)
+            # lifted onto the overhanging faces: same samples whatever the
+            # tessellation (face centroids, used before, multiplied the contacts
+            # on finely meshed surfaces). A sample farther than the contact
+            # spacing from every accepted contact is a hole in the coverage and
+            # gets a contact, which then covers the spacing around it, so the
+            # residual fill has the same density as the hex fill of step 5.
+            cand, cf = _lattice_on_faces(P.v, P.f, ids, RESIDUAL_PITCH * P.s)
+            # a narrow patch may contain no lattice point: one sample per such
+            # component (the face centroid closest to its area weighted centre)
+            have = np.zeros(int(labels.max()) + 1, dtype=bool)
+            if len(cf):
+                pos_of = np.full(len(P.f), -1, dtype=np.int64)
+                pos_of[ids] = np.arange(len(ids))
+                have[labels[pos_of[cf]]] = True
+            miss = np.nonzero(~have)[0]
+            if len(miss):
+                cen = P.v[P.f[ids]].mean(axis=1)
+                wa = P.area[ids]
+                sel_f = np.isin(labels, miss)
+                lab_m, cen_m, w_m, id_m = labels[sel_f], cen[sel_f], wa[sel_f], ids[sel_f]
+                cw = np.zeros((int(labels.max()) + 1, 3))
+                for c in range(3):
+                    cw[:, c] = np.bincount(lab_m, weights=cen_m[:, c] * w_m, minlength=len(cw))
+                tw = np.bincount(lab_m, weights=w_m, minlength=len(cw))
+                cw /= np.maximum(tw, 1e-12)[:, None]
+                dist = np.linalg.norm(cen_m - cw[lab_m], axis=1)
+                o = np.lexsort((dist, lab_m))
+                firsts = o[np.r_[True, lab_m[o][1:] != lab_m[o][:-1]]]
+                cand = np.concatenate([cand, cen_m[firsts]])
+                cf = np.concatenate([cf, id_m[firsts]])
+            P.stats["residual_samples"] = int(len(cand))
+            # deterministic, tessellation independent order: low first, then x, y
+            rq = np.round(cand / 1e-4)
+            order = np.lexsort((rq[:, 1], rq[:, 0], rq[:, 2]))
+            if P.cov.pts and len(order):       # drop samples already covered
+                d, _ = cKDTree(np.asarray(P.cov.pts)).query(cand[order], distance_upper_bound=P.s)
+                order = order[~np.isfinite(d)]
+            cand, cf = cand[order], cf[order]
             cand, cf = P.avoid_details(cand, cf, min(0.25 * P.s, 0.6))
             nrm = P.normal_of(cf)
             order = np.arange(len(cand))
@@ -608,8 +785,9 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
                     progress.update(0.8 + 0.2 * i / len(order), "Checking overhanging faces")
                 tilt = math.degrees(math.acos(max(-1.0, min(1.0, -nrm[k, 2]))))
                 P.offer(cand[k], nrm[k], ContactReason.SURFACE,
-                        f"downward face ({tilt:.0f} deg from horizontal) at z={cand[k, 2]:.2f} mm",
-                        radius=P.r_s)
+                        f"downward face ({tilt:.0f} deg from horizontal) at z={cand[k, 2]:.2f} mm, "
+                        f"more than {P.s:.1f} mm from any other contact",
+                        radius=P.s)
 
     progress.update(1.0, f"{len(P.out)} contacts placed")
     if isinstance(analysis.stats, dict):
