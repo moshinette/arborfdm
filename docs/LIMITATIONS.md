@@ -6,7 +6,7 @@ Liste tenue à jour à partir des rapports des sous-agents et de la revue QA (`d
 
 - **Aucune impression physique** : diamètres de pointe, densités, pieds et profils sont des points de départ raisonnés, pas des valeurs mesurées. Protocole : `docs/PHYSICAL_TESTS.md`.
 - **Slicers** : l'import dans Bambu Studio, OrcaSlicer, PrusaSlicer et Cura n'a pas été testé dans ces logiciels. Le 3MF est validé par trimesh et lib3mf (mode strict, 0 avertissement). Analyse du comportement attendu : `docs/SLICERS.md`.
-- **Windows** : `scripts/build_windows.bat` et `run_dev.bat` n'ont pas été exécutés sous Windows. Le spec PyInstaller a été validé par un build Linux (CLI gelée exécutée avec succès).
+- **Windows** : `scripts/build_windows.bat` a réussi sous Windows le 2026-10-15 avec Python 3.12.10 (tests CLI/export, PyInstaller, test de la CLI gelée sur `examples/shelf.stl`, zip). L'interface graphique gelée et `run_dev.bat` restent à essayer. Python 3.10.0 (bug PyInstaller) et 3.15+ (pas de paquet `manifold3d`) ne sont pas utilisables pour le build.
 - **Rendu OpenGL** : testé seulement sous xvfb (captures) et en offscreen ; fluidité non mesurée sur une vraie carte graphique.
 
 ## Moteur

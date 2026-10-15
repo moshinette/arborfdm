@@ -52,7 +52,7 @@ Mesures QA (getrusage) : figurine 0.4 Normal 2,3 s / 228 Mo ; 0.2 Dense 4,7 s / 
 
 ## 4. Non testé
 
-- Windows (build et exécution).
+- Interface graphique gelée sous Windows (le build Windows et la CLI gelée ont réussi le 2026-10-15, Python 3.12.10).
 - Import dans Bambu Studio, OrcaSlicer, PrusaSlicer, Cura.
 - Impressions physiques : aucune. Banc d'essai prêt (`scripts/make_tip_bench.py`, protocole `docs/PHYSICAL_TESTS.md`).
 - Fluidité du rendu sur une vraie carte graphique.
