@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13", "PyOpenGL>=3.1"]
-dev = ["pytest>=8", "pyinstaller>=6"]
+dev = ["pytest>=8", "pyinstaller>=6", "lxml>=4.9"]
 
 [project.scripts]
 arborfdm-cli = "arbor.cli:main"

@@ -52,7 +52,7 @@ Codes retour : 0 succès, 1 fichier écrit mais erreurs de vérification, 2 erre
 
 ## Version Windows autonome
 
-`scripts\build_windows.bat` crée un environnement, installe les dépendances, lance PyInstaller (`packaging/arborfdm.spec`) et produit `dist/ArborFDM-win64.zip` contenant `ArborFDM.exe` (interface) et `arborfdm-cli.exe`. Aucune installation de Python n'est nécessaire sur le poste cible. Voir `docs/PACKAGING.md`. Ce script n'a pas encore été exécuté sous Windows (le spec a été validé par un build Linux).
+`scripts\build_windows.bat` crée un environnement, installe les dépendances, lance PyInstaller (`packaging/arborfdm.spec`) et produit `dist\ArborFDM-<version>-windows-x64.zip` contenant `ArborFDM.exe` (interface) et `arborfdm-cli.exe`. Aucune installation de Python n'est nécessaire sur le poste cible. Voir `docs/PACKAGING.md`. Ce script n'a pas encore été exécuté sous Windows (le spec a été validé par un build Linux).
 
 ## Dans le slicer
 
