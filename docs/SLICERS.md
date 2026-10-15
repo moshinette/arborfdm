@@ -71,3 +71,13 @@ Pour chaque slicer et chaque fichier : noter la version, le dialogue affiché, l
 [^bambudrop]: Forum Bambu Lab, « Merge items Bambu Studio automatically drops to bed », <https://forum.bambulab.com/t/merge-items-bambu-studio-automatically-drops-to-bed/139831>
 [^bambuwarn]: Forum Bambu Lab, « Warning message » (texte du dialogue multi-hauteurs, choix « Oui »), <https://forum.bambulab.com/t/warning-message/110576>
 [^curaforum]: Forum UltiMaker, « How do you actually load parts in the position they were saved? », <https://community.ultimaker.com/topic/43309-how-do-you-actually-load-parts-in-the-position-they-were-saved/>
+
+## Essai réel : OrcaSlicer 2.4.2, Bambu Lab A1 mini, buse 0,2 (2026-10-15)
+
+Premier essai dans un vrai slicer, réalisé par l'utilisateur sous Windows (aperçu du découpage, pas encore d'impression).
+
+- `examples/figurine.stl`, profil `nozzle_02_*` : Orca regroupe automatiquement figurine, supports et raft en **un seul objet à 3 pièces** ; aucune question « multi-part object » n'est posée ; l'alignement est conservé.
+- `bridge` : deux objets séparés (modèle et supports), alignement correct, pas de question non plus (tout repose sur le plateau).
+- **La buse réglée dans le slicer doit correspondre au profil ArborFDM.** Avec un profil ArborFDM 0,2 découpé alors que la buse réglée dans Orca était différente, les branches fines sortaient en « gap infill » discontinu et les pointes disparaissaient (support qui ne touche plus le modèle). Avec la buse réglée sur 0,2 : supports en parois continues, gap infill à 0,1 %, pointes jusqu'au dessous de l'épée.
+- Supports du slicer désactivés (« Enable support » décoché).
+- Reste à faire : vérifier couche par couche la couche de contact de chaque pointe, et une impression réelle.
