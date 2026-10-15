@@ -473,10 +473,7 @@ class _Router:
                 continue
             b = tree.add(base, self.r_tipbase, NodeKind.BRANCH, contact_id=c.id)
             tip.parent = b.id
-            kb = int(math.floor((base[2] - zb) / dz + 1e-9))
-            if base[2] - (zb + kb * dz) < 0.3 * dz and kb >= 1:
-                kb -= 1
-            kb = min(kb, self.n_slabs - 1)
+            kb = self._base_level(base[2])
             move = (base[2] - (zb + kb * dz)) * self.tan
             self.pending.append((kb, b.id, move, max(self.r_min, self.r_tipbase)))
         self.pending.sort(key=lambda t: -t[0])
@@ -598,8 +595,23 @@ class _Router:
         for s in (0.5, 0.75, 1.0):
             if self.grid.inside(pos + u * (s * P.tip_length)):
                 return -1.0
-        k = int(math.floor((base[2] - zb) / dz))
-        return float(self.mdist2(k, base[:2])[0])
+        # only the slabs the tip base and its first segment really occupy: from the slab
+        # holding the base down to the routing level the base descends to. mdist2 (slab
+        # below the node as well) was too pessimistic here: depending on where the levels
+        # fall (they move with z_base, e.g. with a raft) it caught material up to 2 dz
+        # below the base (figurine cape top under the chin, QA-9) and hid every free
+        # direction.
+        k = int(math.floor((base[2] - zb) / dz + 1e-9))
+        kb = self._base_level(base[2])
+        return float(min(self.mdist(kk, base[:2])[0] for kk in range(kb, max(k, kb) + 1)))
+
+    def _base_level(self, bz: float) -> int:
+        """Routing level a tip base at height bz descends to (its first branch node)."""
+        zb, dz = self.zb, self.dz
+        kb = int(math.floor((bz - zb) / dz + 1e-9))
+        if bz - (zb + kb * dz) < 0.3 * dz and kb >= 1:
+            kb -= 1
+        return min(kb, self.n_slabs - 1)
 
     def _tip_dir(self, pos: np.ndarray, n: np.ndarray) -> np.ndarray:
         """Tip axis direction. Default: tip_direction() (down, tilted towards the surface
@@ -889,12 +901,13 @@ class _Router:
         p1 = np.array([xy[0], xy[1], z1])
         r0, r1 = float(node.radius), max(self.r_min, self.r_tipbase)
         n = max(2, int(math.ceil((z - z1) / (0.5 * dz))) + 1)
-        for t in np.linspace(0.0, 1.0, n):
+        # samples every dz / 2 (so every slab crossed is sampled); the start node itself is
+        # skipped: it already exists and its clearance was decided when it was placed
+        # (re-testing it rejected every landing of a tight tip base, QA-9)
+        for t in np.linspace(0.0, 1.0, n)[1:]:
             q = p0 + t * (p1 - p0)
             k = int(math.floor((q[2] - zb) / dz + 1e-9))
-            # slab of the sample and the one below; at the tip base only the slab above
-            # it (below is the tip, which reaches the surface by design)
-            d = self.mdist(k, q[:2])[0] if t >= 1.0 - 1e-9 else self.mdist2(k, q[:2])[0]
+            d = self.mdist(k, q[:2])[0]
             if d < (r0 + t * (r1 - r0)) + self.hard - 1e-9:
                 return False
         return True

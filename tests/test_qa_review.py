@@ -166,8 +166,6 @@ def test_raft_supports_stand_on_raft_and_avoid_model(figurine):
     assert abs(inter.volume()) < 1e-6                         # raft never under the model
 
 
-@pytest.mark.xfail(strict=True, reason="QA-9: enabling the raft makes a contact unroutable on "
-                   "the figurine (contact 'blocked by the model') that is routed without raft")
 def test_raft_does_not_lose_contacts(figurine, fig_normal):
     r = pipeline.generate(figurine, NORMAL.updated(raft_enabled=True))
     assert fig_normal.errors == []
@@ -232,9 +230,6 @@ def test_extreme_valid_params_on_small_models(over):
             assert sm.is_watertight and sm.bounds[0, 2] >= -1e-6
 
 
-@pytest.mark.xfail(strict=True, reason="QA-2: contact_spacing=0.2 (minimum of the GUI spin box, "
-                   "accepted by validate) exhausts memory: unchunked candidate arrays in "
-                   "contacts.VerticalCaster.cast (>4 GB on the 62k triangle figurine)")
 def test_min_contact_spacing_bounded_memory():
     rc, out, err, wall, _ = _run_limited("""
         from arbor.core.mesh_io import load_mesh
@@ -753,9 +748,6 @@ def test_gui_every_control_has_an_effect(qapp, win, tmp_path):
     assert p.has_model and len(p.contacts) == n
 
 
-@pytest.mark.xfail(strict=True, reason="QA-3: the panels stay enabled during a generation; a "
-                   "manual contact deleted (and a parameter changed) while it runs is silently "
-                   "overwritten by the result, which is then treated as current")
 def test_gui_edits_during_generation_are_not_lost(qapp, win):
     w, p = win, win.project
     assert w.open_path(str(FIGURINE)); _wait(qapp, w)
@@ -773,8 +765,6 @@ def test_gui_edits_during_generation_are_not_lost(qapp, win):
     assert built_tip == pytest.approx(0.6, abs=0.05) or p.contacts_edited
 
 
-@pytest.mark.xfail(strict=True, reason="QA-3: export writes the CURRENT parameters as 3MF metadata "
-                   "even when the supports were generated with other ones, without any warning")
 def test_gui_export_metadata_matches_generated_geometry(qapp, win, tmp_path):
     w, p = win, win.project
     assert w.open_path(str(EX / "suspended_arm.stl")); _wait(qapp, w)
@@ -788,9 +778,6 @@ def test_gui_export_metadata_matches_generated_geometry(qapp, win, tmp_path):
     assert meta["tip_diameter"] == pytest.approx(NORMAL.tip_diameter)
 
 
-@pytest.mark.xfail(strict=True, reason="QA-7: RightPanel.set_issues uses list.index on Issue "
-                   "dataclasses holding numpy arrays: two issues with the same message (two "
-                   "identical minis on the plate) raise ValueError and leave the panel half updated")
 def test_issue_list_with_identical_messages(qapp):
     from arbor.app.panels import RightPanel
     from arbor.core.project import Project
@@ -812,9 +799,6 @@ def test_two_identical_minis_produce_identical_issue_messages(figurine):
     assert len(msgs) != len(set(msgs))
 
 
-@pytest.mark.xfail(strict=True, reason="QA-13: the 'contacts were edited since the last generation' "
-                   "export warning is written to the status bar and immediately replaced by "
-                   "'Exporting...', then by 'Exported ...': the user never sees it")
 def test_gui_export_warns_about_unrebuilt_edits(qapp, win, tmp_path):
     w, p = win, win.project
     assert w.open_path(str(EX / "suspended_arm.stl")); _wait(qapp, w)

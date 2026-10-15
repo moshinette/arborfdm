@@ -157,6 +157,21 @@ class GenerationRequest:
     mesh_version: int
     analysis_key: tuple
     contacts_version: int
+    params: Optional[SupportParams] = None          # snapshot used to build the geometry
+    contacts_before: list = field(default_factory=list)   # contacts when the run started
+
+
+@dataclass
+class ApplyReport:
+    """What happened when a result was applied (edits made while it was computing)."""
+    applied: bool = True
+    kept_edits: list[str] = field(default_factory=list)      # user edits merged into it
+    lost_edits: list[str] = field(default_factory=list)      # edits that could not be mapped
+    changed_params: dict = field(default_factory=dict)       # {name: (used, current)}
+
+    @property
+    def stale(self) -> bool:
+        return bool(self.kept_edits or self.lost_edits or self.changed_params)
 
 
 @dataclass
@@ -165,6 +180,7 @@ class ProjectState:
     contacts: list[Contact]
     result: Optional[GenerationResult]
     contacts_edited: bool
+    result_params: Optional[SupportParams] = None   # parameters the result was built with
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +213,10 @@ class Project:
                                       if key else SupportParams())
         self.contacts: list[Contact] = []
         self.result: Optional[GenerationResult] = None
+        self.result_params: Optional[SupportParams] = None   # params used to build result
         self.contacts_edited = False       # contacts changed by hand since last generation
+        self.last_apply: Optional[ApplyReport] = None
+        self._mesh_reports: dict[int, tuple] = {}   # id(base mesh) -> (mesh, MeshReport)
         self.contacts_version = 0
         self.selected_contact_id: Optional[int] = None
         self._analysis_cache: Optional[tuple[tuple, AnalysisResult]] = None
@@ -344,6 +363,7 @@ class Project:
             kept.append(c)
         self.contacts = kept
         self.result = None
+        self.result_params = None
         self.contacts_edited = bool(kept)
         self.contacts_version += 1
 
@@ -455,11 +475,13 @@ class Project:
             self._emit("selection")
 
     def snapshot(self) -> ProjectState:
-        return ProjectState(copy.deepcopy(self.contacts), self.result, self.contacts_edited)
+        return ProjectState(copy.deepcopy(self.contacts), self.result, self.contacts_edited,
+                            self.result_params)
 
     def restore(self, s: ProjectState) -> None:
         self.contacts = copy.deepcopy(s.contacts)
         self.result = s.result
+        self.result_params = s.result_params if s.result is not None else None
         self.contacts_edited = s.contacts_edited
         self.contacts_version += 1
         if self.selected_contact_id is not None and self.contact(self.selected_contact_id) is None:
@@ -507,22 +529,119 @@ class Project:
             # only the user's contacts: skip automatic placement entirely
             kwargs["contacts"] = copy.deepcopy(self.manual_contacts())
         return GenerationRequest(mode, kwargs, self.mesh_version, self.analysis_key(),
-                                 self.contacts_version)
+                                 self.contacts_version, copy.deepcopy(params),
+                                 copy.deepcopy(self.contacts))
 
     def is_request_current(self, req: GenerationRequest) -> bool:
-        return req.mesh_version == self.mesh_version
+        """True if nothing that the request was built from changed since: model, contacts
+        and parameters. A request whose model changed cannot be applied at all; one whose
+        contacts or parameters changed is applied but marked out of date (apply_result)."""
+        return (req.mesh_version == self.mesh_version
+                and req.contacts_version == self.contacts_version
+                and (req.params is None or not _params_diff(req.params, self.params)))
+
+    def result_param_changes(self) -> dict[str, tuple[Any, Any]]:
+        """{field: (value used for the current result, current value)}."""
+        if self.result is None or self.result_params is None:
+            return {}
+        return _params_diff(self.result_params, self.params)
+
+    @property
+    def result_is_stale(self) -> bool:
+        """The displayed supports do not match the current contacts or parameters."""
+        return self.result is not None and (self.contacts_edited
+                                            or bool(self.result_param_changes()))
+
+    def export_params(self) -> SupportParams:
+        """Parameters to write with an export: those that built the supports (QA-3)."""
+        if self.result is not None and self.result_params is not None:
+            return copy.deepcopy(self.result_params)
+        return copy.deepcopy(self.params)
 
     def apply_result(self, result: GenerationResult, request: Optional[GenerationRequest] = None,
                      text: str = "Generate supports") -> bool:
-        """Store a generation result (undoable). Returns False if the result is stale
-        (the model changed while computing)."""
-        if request is not None and not self.is_request_current(request):
+        """Store a generation result (undoable). Returns False if the model changed while
+        computing (the result cannot be used).
+
+        Contact edits made while the result was computing are replayed on the result's
+        contact list (deleted contacts stay deleted, added manual contacts stay, edited
+        contacts keep their edit) and the result is then marked out of date
+        (contacts_edited); parameters that changed are reported by result_param_changes().
+        ``self.last_apply`` describes what happened."""
+        rep = ApplyReport()
+        self.last_apply = rep
+        if request is not None and request.mesh_version != self.mesh_version:
+            rep.applied = False
             return False
         if request is not None and result.analysis is not None:
             self._analysis_cache = (request.analysis_key, result.analysis)
-        new_state = ProjectState(copy.deepcopy(result.contacts), result, False)
+        contacts = copy.deepcopy(result.contacts)
+        edited = False
+        if request is not None and request.contacts_version != self.contacts_version:
+            contacts = self._replay_edits(contacts, request, rep)
+            edited = bool(rep.kept_edits or rep.lost_edits)
+        used = copy.deepcopy(request.params) if request is not None and request.params is not None \
+            else copy.deepcopy(self.params)
+        rep.changed_params = _params_diff(used, self.params)
+        new_state = ProjectState(contacts, result, edited, used)
         self.undo_stack.push(SetStateCommand(self, self.snapshot(), new_state, text), merge=False)
         return True
+
+    def _replay_edits(self, contacts: list[Contact], req: GenerationRequest,
+                      rep: ApplyReport) -> list[Contact]:
+        before = {c.id: c for c in req.contacts_before}
+        now = {c.id: c for c in self.contacts}
+        # in a full generation automatic contacts are new objects: their ids do not refer
+        # to the contacts the user saw, only manual contacts (kept by id) can be mapped
+        mappable = (lambda c: True) if req.mode == "branches" else (lambda c: c.manual)
+        removed = {i for i in before if i not in now}
+        modified = {i: now[i] for i in before if i in now
+                    and before[i].to_dict() != now[i].to_dict()}
+        added = [c for i, c in now.items() if i not in before]
+        out = []
+        for c in contacts:
+            if c.id in removed and mappable(before[c.id]):
+                rep.kept_edits.append(f"contact #{c.id} deleted")
+                continue
+            if c.id in modified and mappable(before[c.id]):
+                rep.kept_edits.append(f"contact #{c.id} edited")
+                c = copy.deepcopy(modified[c.id])
+            out.append(c)
+        for i in removed | set(modified):
+            if not mappable(before[i]):
+                rep.lost_edits.append(f"automatic contact #{i} "
+                                      f"{'deleted' if i in removed else 'edited'} "
+                                      "(replaced by the new automatic contacts)")
+        used_ids = {c.id for c in out}
+        for c in added:
+            c = copy.deepcopy(c)
+            if c.id in used_ids:
+                new_id = max(used_ids) + 1
+                if self.selected_contact_id == c.id:
+                    self.selected_contact_id = new_id
+                c.id = new_id
+            used_ids.add(c.id)
+            out.append(c)
+            rep.kept_edits.append(f"contact #{c.id} added")
+        return out
+
+    # -- mesh diagnosis (QA-6) ---------------------------------------------------
+    def set_mesh_report(self, mesh: Optional[trimesh.Trimesh], report) -> None:
+        """Remember the check_mesh report of a base mesh (the imported or a repaired one)."""
+        if mesh is not None and report is not None:
+            self._mesh_reports[id(mesh)] = (mesh, report)
+
+    def mesh_report(self):
+        """check_mesh report of the current working mesh, or None if it was not checked."""
+        if self.base_mesh is None:
+            return None
+        entry = self._mesh_reports.get(id(self.base_mesh))
+        return entry[1] if entry is not None and entry[0] is self.base_mesh else None
+
+    def mesh_problems(self) -> list:
+        """Error-severity problems of the working mesh (empty if valid or not checked)."""
+        r = self.mesh_report()
+        return [x for x in getattr(r, "problems", []) if x.severity == "error"] if r else []
 
     def clear_supports(self) -> None:
         if not self.contacts and self.result is None:
@@ -625,6 +744,7 @@ class Project:
         self.contacts = [Contact.from_dict(c) for c in data.get("contacts", [])]
         self.contacts_edited = bool(data.get("contacts_edited", bool(self.contacts)))
         self.result = None
+        self.result_params = None
         self.contacts_version += 1
         self.path = path
         self.undo_stack.clear()
@@ -818,6 +938,20 @@ class SetStateCommand(Command):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+def _params_diff(a: SupportParams, b: SupportParams) -> dict[str, tuple[Any, Any]]:
+    """{field: (a value, b value)} for every differing field."""
+    da, db = a.to_dict(), b.to_dict()
+    out = {}
+    for k, va in da.items():
+        vb = db.get(k)
+        if isinstance(va, float) and isinstance(vb, (int, float)) and not isinstance(vb, bool):
+            if abs(va - vb) > 1e-9:
+                out[k] = (va, vb)
+        elif va != vb:
+            out[k] = (va, vb)
+    return out
+
+
 def _eq(a, b) -> bool:
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
         return np.array_equal(np.asarray(a), np.asarray(b))

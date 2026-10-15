@@ -156,3 +156,73 @@ def test_sphere_sunk_2mm_is_below_overhang_angle():
         & (m.triangles_center[:, 2] > plate)
     assert m.area_faces[over].sum() < 0.25
     assert np.ptp(m.triangles_center[over, 2]) < p.layer_height
+
+
+# ---------------------------------------------------------------------------
+# QA-2: bounded memory with a tiny contact spacing
+# ---------------------------------------------------------------------------
+def test_cast_chunking_gives_same_hits(monkeypatch):
+    m = S.figurine()
+    caster = contacts.VerticalCaster(m)
+    rng = np.random.default_rng(3)
+    lo, hi = m.bounds
+    pts = np.column_stack([rng.uniform(lo[0], hi[0], 3000), rng.uniform(lo[1], hi[1], 3000),
+                           rng.uniform(lo[2], hi[2], 3000)])
+    z0, f0 = caster.cast(pts)
+    monkeypatch.setattr(contacts, "CAST_POINT_BLOCK", 97)
+    monkeypatch.setattr(contacts, "CAST_MAX_PAIRS", 50)
+    z1, f1 = caster.cast(pts)
+    assert np.array_equal(f0, f1) and np.array_equal(np.isnan(z0), np.isnan(z1))
+    assert np.array_equal(z0[~np.isnan(z0)], z1[~np.isnan(z1)])
+
+
+def test_lattice_blocks_and_cap():
+    m = trimesh.creation.box(extents=(10, 6, 2)).subdivide().subdivide()
+    v, f = np.asarray(m.vertices), np.asarray(m.faces)
+    down = np.nonzero(m.face_normals[:, 2] < -0.9)[0]
+    p0, f0 = _lattice_on_faces(v, f, down, 0.25)
+    p1, f1 = _lattice_on_faces(v, f, down, 0.25, block=5)
+    assert np.array_equal(p0, p1) and np.array_equal(f0, f1)
+    p2, _, g = _lattice_on_faces(v, f, down, 0.25, max_points=200, return_pitch=True)
+    assert g > 0.25 and 0 < len(p2) <= 200
+
+
+@pytest.mark.parametrize("spacing", [3.0, 0.4])
+def test_fill_blocks_do_not_change_contacts(monkeypatch, spacing):
+    p = P().updated(contact_spacing=spacing)
+    m = S.figurine()
+    _, ref = place(m, p)
+    monkeypatch.setattr(contacts, "FILL_BLOCK", 7)
+    monkeypatch.setattr(contacts, "CAST_POINT_BLOCK", 101)
+    monkeypatch.setattr(contacts, "LATTICE_BLOCK", 1000)
+    _, cs = place(m, p)
+    assert [(c.id, c.reason, c.note) for c in cs] == [(c.id, c.reason, c.note) for c in ref]
+    assert np.array_equal(np.array([c.position for c in cs]), np.array([c.position for c in ref]))
+
+
+def test_min_spacing_contacts_peak_memory():
+    """contact_spacing = 0.2 (minimum accepted by validate) on the 62k face figurine:
+    measured ~470 MB peak RSS after the fix (> 4 GB, OOM, before)."""
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    code = textwrap.dedent("""
+        import resource
+        from tests.models import synthetic as S
+        from arbor.engine import analysis, contacts
+        from arbor.engine.params import load_profiles
+        from arbor.engine.types import Progress
+        p = load_profiles()['nozzle_04_normal'].params.updated(contact_spacing=0.2)
+        m = S.figurine()
+        a = analysis.analyze(m, p, Progress())
+        cs = contacts.place_contacts(m, a, p, [], Progress())
+        assert cs and all(c.note for c in cs)
+        print('RSS_MB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)
+    """)
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True,
+                         timeout=300, env={**__import__("os").environ, "PYTHONPATH": str(root)})
+    assert out.returncode == 0, out.stderr[-500:]
+    rss = float(out.stdout.split("RSS_MB")[1])
+    assert rss < 1500, f"peak RSS {rss:.0f} MB"

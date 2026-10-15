@@ -26,15 +26,28 @@ EXPORT_REMINDER = (
 
 
 # --- background task functions (run in the worker thread) ----------------------------
+def _safe_check(mesh):
+    """check_mesh report, or None if the diagnosis itself fails (never blocks a load)."""
+    from arbor.core.repair import check_mesh
+    try:
+        return check_mesh(mesh)
+    except Exception:
+        return None
+
+
 def _task_load(progress, path: str):
     from arbor.core.mesh_io import load_mesh
     progress.update(0.1, "Reading file")
-    return load_mesh(path)
+    loaded = load_mesh(path)
+    progress.update(0.7, "Checking mesh")
+    return loaded, _safe_check(loaded.mesh)
 
 
 def _task_load_project(progress, path: str, profiles):
     progress.update(0.1, "Reading project")
-    return Project.load(path, profiles)
+    project = Project.load(path, profiles)
+    progress.update(0.7, "Checking mesh")
+    return project, _safe_check(project.base_mesh)
 
 
 def _task_check(progress, mesh):
@@ -77,6 +90,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner = TaskRunner(self)
         self.last_error = ""
         self.last_mesh_report = None
+        self.last_info = ("", "")
+        self.last_mesh_warning = ""
+        # what to do when generating on a mesh with errors and no dialog can be shown
+        # (tests, scripted use): "generate" (with a visible warning), "repair" or "cancel"
+        self.broken_mesh_choice = "generate"
+        self._generate_after_repair: Optional[bool] = None
         self.setWindowTitle("ArborFDM")
         self.resize(1500, 920)
 
@@ -308,13 +327,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_new.setEnabled(not busy)
         self.act_open.setEnabled(not busy)
         self.act_cancel.setEnabled(busy)
-        self.left.import_button.setEnabled(not busy)
-        self.viewport.edit_enabled = has and not busy
+        # QA-3: the model (transform, repair, import) is locked while a task runs; contact
+        # and parameter edits stay possible and mark the result out of date when it arrives
+        self.left.set_busy(busy)
+        self.viewport.edit_enabled = has
+        self._refresh_banner()
         self.viewport.set_tip_preview(p.params.tip_length, p.params.tip_base_diameter)
         if p.contacts_edited and res:
             self.act_rebuild.setText("Rebuild branches *")
         else:
             self.act_rebuild.setText("Rebuild branches")
+        self.act_generate.setText("Generate supports *" if p.result_param_changes()
+                                  else "Generate supports")
+
+    def stale_reasons(self) -> list[str]:
+        """Why the displayed supports do not match the document (empty if they do)."""
+        p = self.project
+        if p.result is None:
+            return []
+        out = []
+        if p.contacts_edited:
+            out.append("contacts edited since the generation (Rebuild branches)")
+        ch = p.result_param_changes()
+        if ch:
+            names = ", ".join(f"{k} {a} -> {b}" for k, (a, b) in list(ch.items())[:4])
+            more = f" (+{len(ch) - 4})" if len(ch) > 4 else ""
+            out.append(f"parameters changed: {names}{more} (Generate supports)")
+        return out
+
+    def _refresh_banner(self) -> None:
+        busy = self.runner.is_running()
+        lines, kind = [], ""
+        if busy:
+            kind = "busy"
+            lines.append(f"{self.runner.label or 'Computing'}...  The model is locked. Contact "
+                         "and parameter edits made now are kept, the result will be marked out "
+                         "of date.")
+        stale = self.stale_reasons()
+        if stale:
+            kind = kind or "stale"
+            lines.append("Supports out of date: " + "; ".join(stale))
+        if self.project.has_model and self.project.mesh_problems():
+            kind = kind or "mesh"
+            lines.append("Mesh has errors (" + ", ".join(
+                x.code for x in self.project.mesh_problems()[:3]) + "): use Mesh check > Repair "
+                "before generating")
+        self.view.set_banner("\n".join(lines), kind)
 
     def _refresh_title(self) -> None:
         p = self.project
@@ -325,6 +383,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if ev == "mesh":
             self.left.refresh_model()
             self._refresh_scene(fit=False)
+            self._refresh_banner()
         elif ev == "transform":
             self.left.refresh_transform()
         elif ev == "params":
@@ -345,9 +404,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_title()
 
     # ------------------------------------------------------------------ helpers
-    def message(self, text: str, error: bool = False) -> None:
+    def message(self, text: str, error: bool = False, warning: bool = False) -> None:
         self.status_msg.setText(text)
-        self.status_msg.setStyleSheet(f"color: {theme.ERROR};" if error else "")
+        self.status_msg.setStyleSheet(f"color: {theme.ERROR};" if error else
+                                      (f"color: {theme.WARNING};" if warning else ""))
 
     def _start(self, fn, kwargs: dict, context, label: str) -> bool:
         if self.runner.is_running():
@@ -458,8 +518,8 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ mesh tools
     def check_mesh(self) -> None:
         if self.project.has_model:
-            self._start(_task_check, {"mesh": self.project.base_mesh.copy()}, ("check",),
-                        "Checking mesh")
+            self._start(_task_check, {"mesh": self.project.base_mesh.copy()},
+                        ("check", self.project.base_mesh), "Checking mesh")
 
     def repair_mesh(self) -> None:
         if self.project.has_model:
@@ -479,16 +539,68 @@ class MainWindow(QtWidgets.QMainWindow):
     def generate_branches(self) -> bool:
         return self._generate(full=False)
 
-    def _generate(self, full: bool) -> bool:
-        if not self.project.has_model:
+    def broken_mesh_text(self) -> str:
+        p = self.project
+        probs = p.mesh_problems()
+        if not probs:
+            return ""
+        return ("The model mesh has errors: " + "; ".join(x.message.rstrip(".") for x in probs[:4])
+                + (f" (+{len(probs) - 4} more)" if len(probs) > 4 else "") + ".\n"
+                "Supports computed on it may be wrong (contacts in holes, unroutable "
+                "contacts, false collisions). Repair it first (a repaired copy is used, the "
+                "imported file is unchanged, undoable).")
+
+    def broken_mesh_box(self) -> QtWidgets.QMessageBox:
+        """The question asked before generating on a broken mesh (QA-6)."""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("Mesh has errors")
+        box.setText("This mesh is not a valid closed solid.")
+        box.setInformativeText(self.broken_mesh_text())
+        box.repair_button = box.addButton("Repair, then generate", QtWidgets.QMessageBox.AcceptRole)
+        box.generate_button = box.addButton("Generate anyway", QtWidgets.QMessageBox.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.setDefaultButton(box.repair_button)
+        return box
+
+    def _ask_broken_mesh(self) -> str:
+        if QtCore.QCoreApplication.instance().property("arbor_no_dialogs"):
+            return self.broken_mesh_choice
+        box = self.broken_mesh_box()
+        box.exec()
+        if box.clickedButton() is box.repair_button:
+            return "repair"
+        if box.clickedButton() is box.generate_button:
+            return "generate"
+        return "cancel"
+
+    def _generate(self, full: bool, mesh_checked: bool = False) -> bool:
+        p = self.project
+        if not p.has_model:
             return False
-        problems = self.project.params.validate()
+        problems = p.params.validate()
         if problems:
             self.message("Invalid parameters: " + "; ".join(problems), error=True)
             return False
-        req = self.project.regenerate(full=full)
+        warn = self.broken_mesh_text()
+        self.last_mesh_warning = warn
+        if warn and not mesh_checked and not self.runner.is_running():
+            choice = self._ask_broken_mesh()
+            if choice == "cancel":
+                self.message("Generation cancelled: the mesh has errors (Mesh check > Repair)",
+                             warning=True)
+                return False
+            if choice == "repair":
+                self._generate_after_repair = full
+                self.repair_mesh()
+                return True
+        req = p.regenerate(full=full)
         label = "Generating supports" if req.mode == "full" else "Rebuilding branches"
-        return self._start(run_generation, req.kwargs, ("generate", req), label)
+        ok = self._start(run_generation, req.kwargs, ("generate", req, warn), label)
+        if ok and warn:
+            self.message(label + "... WARNING: the mesh has errors, results may be wrong "
+                         "(Mesh check > Repair)", warning=True)
+        return ok
 
     def cancel_task(self) -> None:
         if self.runner.is_running():
@@ -513,18 +625,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if r is None and kind != "stl_all" and kind != "3mf":
             self.message("Generate supports first", error=True)
             return
+        warnings = []
         if r is not None and p.contacts_edited:
-            self.message("Contacts were edited since the last generation: rebuild the branches "
-                         "before exporting, or the export will not include the edits.",
-                         error=True)
+            warnings.append("Contacts were edited since the last generation: the file does not "
+                            "include these edits (use Rebuild branches, then export again).")
+        changed = p.result_param_changes() if r is not None else {}
+        if changed:
+            warnings.append("Parameters changed since the supports were generated ("
+                            + ", ".join(f"{k} {a} -> {b}" for k, (a, b) in changed.items())
+                            + "): the file holds the supports as generated, with the "
+                            "parameters really used; generate again to apply the new values.")
+        if warnings:
+            self.message(" ".join(warnings), warning=True)
         base = (p.name or "model").rsplit(".", 1)[0]
         path = self._ask_path(True, caption, filt, base + suffix)
         if not path:
             return
+        # snapshot taken now: the parameters written are those that built the geometry
+        params = p.export_params()
         self._start(_task_export, {"kind": kind, "path": path, "model": p.mesh.copy(),
                                    "supports": r.support_mesh if r else None,
-                                   "raft": r.raft_mesh if r else None, "params": p.params,
-                                   "name": base}, ("export", path, kind), "Exporting")
+                                   "raft": r.raft_mesh if r else None, "params": params,
+                                   "name": base}, ("export", path, kind, warnings, params),
+                    "Exporting")
 
     # ------------------------------------------------------------------ task results
     def _on_running_changed(self, running: bool) -> None:
@@ -543,11 +666,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_task_failed(self, message: str, tb: str, context) -> None:
         self.last_error = tb
         kind = context[0] if context else ""
+        self._generate_after_repair = None
         self.message(f"{self.runner.label or kind} failed: {message}", error=True)
         if kind in ("load", "open_project"):
             self._info("Cannot open file", message)
 
     def _on_task_cancelled(self, context) -> None:
+        self._generate_after_repair = None
         self.message("Cancelled")
 
     def _on_task_finished(self, result, context) -> None:
@@ -555,21 +680,36 @@ class MainWindow(QtWidgets.QMainWindow):
         elapsed = self.runner.elapsed
         p = self.project
         if kind == "load":
+            result, report = result
             p.set_model(result.mesh, name=result.name, source_path=str(context[1]),
                         warnings=list(result.warnings))
-            self.last_mesh_report = None
-            self.left.mesh_report.setText("Not checked")
-            self.left.mesh_report.setStyleSheet("")
+            p.set_mesh_report(p.base_mesh, report)
+            self.last_mesh_report = report
             self.left.show_candidates([])
+            self._show_mesh_state(report)
             self._refresh_everything(fit=True)
-            self.message(f"Loaded {result.name}: {len(result.mesh.faces):,} triangles"
-                         + (f", {len(result.warnings)} warning(s)" if result.warnings else ""))
+            msg = (f"Loaded {result.name}: {len(result.mesh.faces):,} triangles"
+                   + (f", {len(result.warnings)} warning(s)" if result.warnings else ""))
+            if p.mesh_problems():
+                self.message(msg + f". The mesh has {len(p.mesh_problems())} error(s): "
+                             "use Mesh check > Repair before generating.", warning=True)
+            else:
+                self.message(msg)
         elif kind == "open_project":
+            result, report = result
             p.adopt(result)                  # same document object: panels keep their refs
+            p.set_mesh_report(p.base_mesh, report)
+            self.last_mesh_report = report
+            self._show_mesh_state(report)
             self._refresh_everything(fit=True)
-            self.message(f"Opened project {Path(context[1]).name}")
+            self.message(f"Opened project {Path(context[1]).name}"
+                         + (" (the mesh has errors: Repair recommended)" if p.mesh_problems()
+                            else ""), warning=bool(p.mesh_problems()))
         elif kind == "check":
             self.last_mesh_report = result
+            if len(context) > 1:
+                p.set_mesh_report(context[1], result)
+                self._refresh_banner()
             ok = getattr(result, "is_valid", not getattr(result, "problems", []))
             text = result.summary() if hasattr(result, "summary") else str(result)
             self.left.show_mesh_report(text, ok)
@@ -579,41 +719,87 @@ class MainWindow(QtWidgets.QMainWindow):
             new_mesh, report = result
             text = report.summary() if hasattr(report, "summary") else str(report)
             self.left.show_mesh_report(text, bool(getattr(report, "success", True)))
+            pending, self._generate_after_repair = self._generate_after_repair, None
             if context[1] != p.mesh_version:
                 self.message("Model changed during the repair: result discarded", error=True)
+                pending = None
             elif getattr(report, "changed", True) and new_mesh is not None:
                 p.replace_base_mesh(new_mesh)
+                p.set_mesh_report(p.base_mesh, getattr(report, "after", None))
                 self.message("Mesh repaired (undo restores the previous mesh; the imported "
                              "file is unchanged)")
             else:
+                p.set_mesh_report(p.base_mesh, getattr(report, "after", None))
                 self.message("Repair: nothing to change")
+            self._refresh_banner()
+            if pending is not None:
+                # the user chose "Repair, then generate"; errors that remain are reported
+                self._generate(pending, mesh_checked=True)
         elif kind == "orient":
             self.left.show_candidates(result)
             self.message(f"{len(result)} orientation(s) found: click one to apply it")
         elif kind == "generate":
             req: GenerationRequest = context[1]
+            warn = context[2] if len(context) > 2 else ""
+            if warn and not any(i.code == "invalid_model_mesh" for i in result.issues):
+                from arbor.engine.types import Issue
+                result.issues.insert(0, Issue("warning", "invalid_model_mesh",
+                                              warn.replace("\n", " ")))
             if not p.apply_result(result, req, text="Generate supports" if req.mode == "full"
                                   else "Rebuild branches"):
                 self.message("The model changed during the computation: result discarded",
                              error=True)
                 return
-            self.message(f"{'Supports generated' if req.mode == 'full' else 'Branches rebuilt'}"
-                         f" in {elapsed:.2f} s: {len(result.contacts)} contacts, "
-                         f"{len(result.errors)} error(s), {len(result.warnings)} warning(s)")
+            msg = (f"{'Supports generated' if req.mode == 'full' else 'Branches rebuilt'}"
+                   f" in {elapsed:.2f} s: {len(result.contacts)} contacts, "
+                   f"{len(result.errors)} error(s), {len(result.warnings)} warning(s)")
+            ar = p.last_apply
+            notes = []
+            if warn:
+                notes.append("the mesh has errors, results may be wrong (Repair)")
+            if ar is not None and (ar.kept_edits or ar.lost_edits):
+                notes.append("edits made during the computation: "
+                             + ", ".join((ar.kept_edits + ar.lost_edits)[:3])
+                             + "; supports out of date, use Rebuild branches")
+            if ar is not None and ar.changed_params:
+                notes.append("parameters changed during the computation ("
+                             + ", ".join(ar.changed_params) + "): built with the previous "
+                             "values, use Generate supports")
+            self.message(msg + (". WARNING: " + "; ".join(notes) if notes else ""),
+                         warning=bool(notes))
+            self._refresh_banner()
             self.right.tabs.setCurrentIndex(1 if result.issues else self.right.tabs.currentIndex())
         elif kind == "export":
             problems = result or []
             path = context[1]
+            warnings = context[3] if len(context) > 3 else []
+            pp = context[4] if len(context) > 4 else p.params
             if problems:
                 self.message(f"Exported {Path(path).name} with {len(problems)} validation "
                              "problem(s)", error=True)
+            elif warnings:
+                # QA-13: the warning given before the export stays visible after it
+                self.message(f"Exported {Path(path).name}. WARNING: " + " ".join(warnings),
+                             warning=True)
             else:
                 self.message(f"Exported {path}")
-            pp = p.params
             text = EXPORT_REMINDER.format(layer=pp.layer_height, walls=pp.walls)
+            if warnings:
+                text = "WARNING:\n" + "\n".join(f"  - {w}" for w in warnings) + "\n\n" + text
             if problems:
                 text += "\n\nValidation problems:\n" + "\n".join(f"  - {x}" for x in problems)
             self._info("Export done", f"Saved {path}\n\n{text}")
+
+    def _show_mesh_state(self, report) -> None:
+        if report is None:
+            self.left.mesh_report.setText("Not checked")
+            self.left.mesh_report.setStyleSheet("")
+            return
+        ok = getattr(report, "is_valid", True)
+        text = report.summary() if hasattr(report, "summary") else str(report)
+        if not ok:
+            text = "Errors found: repair before generating\n" + text
+        self.left.show_mesh_report(text, ok)
 
     # ------------------------------------------------------------------ close
     def closeEvent(self, ev: QtGui.QCloseEvent) -> None:

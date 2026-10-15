@@ -61,7 +61,12 @@ ROUGH_THRESHOLD = 0.02
 ROUGH_GAIN = 0.02
 DETAIL_RADIUS = 0.4
 ISLAND_Z_SEARCH = 3.0
-EDGE_BREAK_DEG = 45.0      # a hanging edge polyline is cut where it turns more than this
+FILL_BLOCK = 4096          # candidates per detail-avoidance / offer block
+LATTICE_BLOCK = 1_000_000  # lattice candidates generated at once
+RESIDUAL_MAX_SAMPLES = 2_000_000  # above this the residual lattice pitch is enlarged
+CAST_POINT_BLOCK = 8192    # points per KD-tree query block in VerticalCaster.cast
+CAST_MAX_PAIRS = 2_000_000  # max (point, triangle) pairs tested at once
+EDGE_BREAK_DEG = 45.0     # a hanging edge polyline is cut where it turns more than this
 RESIDUAL_PITCH = 0.2       # lattice pitch of the residual check, fraction of contact spacing
 
 
@@ -148,14 +153,32 @@ class VerticalCaster:
             bestf[pi[upd]] = ti[upd]
 
         if self.tree is not None:
-            lists = self.tree.query_ball_point(pts[:, :2], self.R * 1.0001 + 1e-9)
-            lens = np.fromiter((len(x) for x in lists), dtype=np.int64, count=N)
-            if lens.sum():
-                pi = np.repeat(np.arange(N), lens)
-                ti = self.small[np.concatenate([np.asarray(x, dtype=np.int64) for x in lists if x])]
-                consider(pi, ti)
+            # bounded memory: points are processed in blocks, and the (point,
+            # triangle) pairs of a block in slices of at most CAST_MAX_PAIRS. All
+            # pairs of one point stay in the same slice, so the result is the
+            # same as an unchunked pass.
+            for s0 in range(0, N, CAST_POINT_BLOCK):
+                blk = np.arange(s0, min(N, s0 + CAST_POINT_BLOCK))
+                lists = self.tree.query_ball_point(pts[blk, :2], self.R * 1.0001 + 1e-9)
+                lens = np.fromiter((len(x) for x in lists), dtype=np.int64, count=len(blk))
+                if not lens.sum():
+                    continue
+                cum = np.cumsum(lens)
+                a = 0
+                while a < len(blk):
+                    base = cum[a - 1] if a else 0
+                    b = int(np.searchsorted(cum, base + CAST_MAX_PAIRS, side="right"))
+                    b = max(b, a + 1)
+                    sub = lens[a:b]
+                    if sub.sum():
+                        pi = np.repeat(blk[a:b], sub)
+                        ti = self.small[np.concatenate(
+                            [np.asarray(x, dtype=np.int64) for x in lists[a:b] if x])]
+                        consider(pi, ti)
+                    a = b
+                del lists
         if len(self.large):
-            chunk = max(1, 2_000_000 // len(self.large))
+            chunk = max(1, CAST_MAX_PAIRS // len(self.large))
             for s in range(0, N, chunk):
                 idx = np.arange(s, min(N, s + chunk))
                 pi = np.repeat(idx, len(self.large))
@@ -330,43 +353,70 @@ def _sample_polyline(pl: np.ndarray, step: float):
 
 
 def _lattice_on_faces(v: np.ndarray, f: np.ndarray, ids: np.ndarray, g: float,
-                      max_points: int = 4_000_000):
+                      max_points: int | None = None, block: int | None = None,
+                      return_pitch: bool = False):
     """Points of the global XY lattice (pitch g, anchored at the origin) that fall
     inside the XY projection of the given faces, lifted onto each face plane.
 
     The lattice does not depend on the triangulation: the same surface gives the
-    same samples whatever its tessellation. Returns (points (N,3), face ids (N,))."""
+    same samples whatever its tessellation. Returns (points (N,3), face ids (N,))
+    and, with return_pitch, the pitch actually used.
+
+    Memory is bounded: faces are processed in blocks of at most `block` lattice
+    candidates (bounding box points), and if the whole surface would need more
+    than `max_points` candidates the pitch is enlarged (by sqrt of the excess) so
+    that a tiny contact spacing cannot exhaust the memory."""
+    max_points = RESIDUAL_MAX_SAMPLES if max_points is None else max_points
+    block = LATTICE_BLOCK if block is None else block
+    empty = (np.zeros((0, 3)), np.zeros(0, dtype=np.int64))
     if len(ids) == 0:
-        return np.zeros((0, 3)), np.zeros(0, dtype=np.int64)
+        return (*empty, g) if return_pitch else empty
     tri = v[f[ids]]
-    lo = np.ceil(tri[:, :, :2].min(axis=1) / g - 1e-9).astype(np.int64)
-    hi = np.floor(tri[:, :, :2].max(axis=1) / g + 1e-9).astype(np.int64)
-    nx = np.maximum(hi[:, 0] - lo[:, 0] + 1, 0)
-    ny = np.maximum(hi[:, 1] - lo[:, 1] + 1, 0)
-    cnt = nx * ny
-    if cnt.sum() > max_points:          # pathological input: coarser lattice
-        return _lattice_on_faces(v, f, ids, g * math.sqrt(cnt.sum() / max_points), max_points)
-    k = np.repeat(np.arange(len(ids)), cnt)
-    if len(k) == 0:
-        return np.zeros((0, 3)), np.zeros(0, dtype=np.int64)
-    r = np.arange(len(k)) - np.repeat(np.cumsum(cnt) - cnt, cnt)
-    nyk = np.maximum(ny[k], 1)
-    x = (lo[k, 0] + r // nyk) * g
-    y = (lo[k, 1] + r % nyk) * g
-    a = tri[k, 0]
-    e1 = tri[k, 1] - a
-    e2 = tri[k, 2] - a
-    det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
-    ok = np.abs(det) > 1e-14
-    det = np.where(ok, det, 1.0)
-    px, py = x - a[:, 0], y - a[:, 1]
-    u = (px * e2[:, 1] - py * e2[:, 0]) / det
-    w = (e1[:, 0] * py - e1[:, 1] * px) / det
-    eps = 1e-9
-    inside = ok & (u >= -eps) & (w >= -eps) & (u + w <= 1 + eps)
-    z = a[:, 2] + u * e1[:, 2] + w * e2[:, 2]
-    pts = np.column_stack([x, y, z])[inside]
-    return pts, ids[k[inside]]
+    txy = tri[:, :, :2]
+    mn, mx = txy.min(axis=1), txy.max(axis=1)
+    for _ in range(8):
+        lo = np.ceil(mn / g - 1e-9).astype(np.int64)
+        hi = np.floor(mx / g + 1e-9).astype(np.int64)
+        nx = np.maximum(hi[:, 0] - lo[:, 0] + 1, 0)
+        ny = np.maximum(hi[:, 1] - lo[:, 1] + 1, 0)
+        cnt = nx * ny
+        total = int(cnt.sum())
+        if total <= max_points:
+            break
+        g *= math.sqrt(total / max_points) * 1.01
+    out_p, out_f = [], []
+    cum = np.cumsum(cnt)
+    f0 = 0
+    while f0 < len(ids):
+        base = cum[f0 - 1] if f0 else 0
+        f1 = max(f0 + 1, int(np.searchsorted(cum, base + block, side="right")))
+        sl = slice(f0, f1)
+        c = cnt[sl]
+        f0 = f1
+        if not c.sum():
+            continue
+        k = np.repeat(np.arange(sl.start, sl.stop), c)
+        r = np.arange(len(k)) - np.repeat(np.cumsum(c) - c, c)
+        nyk = np.maximum(ny[k], 1)
+        x = (lo[k, 0] + r // nyk) * g
+        y = (lo[k, 1] + r % nyk) * g
+        a = tri[k, 0]
+        e1 = tri[k, 1] - a
+        e2 = tri[k, 2] - a
+        det = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+        ok = np.abs(det) > 1e-14
+        det = np.where(ok, det, 1.0)
+        px, py = x - a[:, 0], y - a[:, 1]
+        u = (px * e2[:, 1] - py * e2[:, 0]) / det
+        w = (e1[:, 0] * py - e1[:, 1] * px) / det
+        eps = 1e-9
+        inside = ok & (u >= -eps) & (w >= -eps) & (u + w <= 1 + eps)
+        z = a[:, 2] + u * e1[:, 2] + w * e2[:, 2]
+        out_p.append(np.column_stack([x, y, z])[inside])
+        out_f.append(ids[k[inside]])
+    pts = np.concatenate(out_p) if out_p else empty[0]
+    fid = np.concatenate(out_f) if out_f else empty[1]
+    return (pts, fid, g) if return_pitch else (pts, fid)
 
 
 def _vertex_normals(v, f, fn, area):
@@ -545,6 +595,34 @@ class _Placer:
         self.slot_of.append(len(self.out) - 1)
         return True
 
+    def offer_stream(self, cand, fid, avoid_r: float, reason: ContactReason, radius: float,
+                     note_fn, on_block=None) -> None:
+        """Detail avoidance + greedy offer of an ordered candidate list, in blocks of
+        FILL_BLOCK candidates so memory stays bounded whatever the spacing.
+
+        Before a block is processed, candidates that are certainly covered are
+        dropped: avoid_details moves a point by at most D = hypot(avoid_r, h), so a
+        candidate within max(radius, dmin) - D of an accepted contact would be
+        rejected by offer() anyway. The result is identical to one unblocked pass
+        (detail avoidance is per point), only the useless work is skipped."""
+        n = len(cand)
+        r_eff = max(radius, self.dmin)
+        drop_r = r_eff - math.hypot(avoid_r, self.h) - 1e-9
+        for s0 in range(0, n, FILL_BLOCK):
+            idx = np.arange(s0, min(n, s0 + FILL_BLOCK))
+            if on_block is not None:
+                on_block(s0, n)
+            if self.cov.pts and drop_r > 0:
+                d, _ = cKDTree(np.asarray(self.cov.pts)).query(cand[idx], distance_upper_bound=drop_r)
+                self.stats["skipped_covered"] += int(np.isfinite(d).sum())
+                idx = idx[~np.isfinite(d)]
+            if len(idx) == 0:
+                continue
+            pos, f2 = self.avoid_details(cand[idx], fid[idx], avoid_r)
+            nrm = self.normal_of(f2)
+            for j, k in enumerate(idx):
+                self.offer(pos[j], nrm[j], reason, note_fn(int(k), pos[j], nrm[j]), radius=radius)
+
     def normal_of(self, fid):
         fid = np.asarray(fid)
         n = np.tile([0.0, 0.0, -1.0], (len(fid), 1))
@@ -716,18 +794,15 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
         sel = P.prefilter(pos, P.r_s, np.argsort(pos[:, 2], kind="stable"))
         pos, fid = pos[sel], fid[sel]
         note_all = [note_all[i] for i in sel]
-        pos, fid = P.avoid_details(pos, fid, min(0.25 * P.s, 0.6))
-        nrm = P.normal_of(fid)
-        order = np.arange(len(pos))
-        for i, k in enumerate(order):
-            if i % 2000 == 0:
-                progress.update(0.5 + 0.3 * i / len(order), "Filling overhang areas")
+
+        def fill_note(k, _p, _n, kind=kind, note_all=note_all):
             r = note_all[k]
             if kind == ContactReason.ISLAND:
-                note = f"fill of island at z={r.z:.2f} mm (area {r.area:.1f} mm2)"
-            else:
-                note = f"unsupported area at z={r.z:.2f} mm (area {r.area:.1f} mm2)"
-            P.offer(pos[k], nrm[k], kind, note, radius=P.r_s)
+                return f"fill of island at z={r.z:.2f} mm (area {r.area:.1f} mm2)"
+            return f"unsupported area at z={r.z:.2f} mm (area {r.area:.1f} mm2)"
+
+        P.offer_stream(pos, fid, min(0.25 * P.s, 0.6), kind, P.r_s, fill_note,
+                       lambda i, n: progress.update(0.5 + 0.3 * i / max(1, n), "Filling overhang areas"))
 
     # ---- 6. face mask fill --------------------------------------------------
     progress.update(0.8, "Checking overhanging faces")
@@ -745,7 +820,10 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
             # spacing from every accepted contact is a hole in the coverage and
             # gets a contact, which then covers the spacing around it, so the
             # residual fill has the same density as the hex fill of step 5.
-            cand, cf = _lattice_on_faces(P.v, P.f, ids, RESIDUAL_PITCH * P.s)
+            g0 = RESIDUAL_PITCH * P.s
+            cand, cf, g = _lattice_on_faces(P.v, P.f, ids, g0, return_pitch=True)
+            P.stats["residual_pitch"] = float(g)
+            P.stats["residual_pitch_capped"] = bool(g > g0 * (1 + 1e-9))
             # a narrow patch may contain no lattice point: one sample per such
             # component (the face centroid closest to its area weighted centre)
             have = np.zeros(int(labels.max()) + 1, dtype=bool)
@@ -777,17 +855,19 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
                 d, _ = cKDTree(np.asarray(P.cov.pts)).query(cand[order], distance_upper_bound=P.s)
                 order = order[~np.isfinite(d)]
             cand, cf = cand[order], cf[order]
-            cand, cf = P.avoid_details(cand, cf, min(0.25 * P.s, 0.6))
-            nrm = P.normal_of(cf)
-            order = np.arange(len(cand))
-            for i, k in enumerate(order):
-                if i % 2000 == 0:
-                    progress.update(0.8 + 0.2 * i / len(order), "Checking overhanging faces")
-                tilt = math.degrees(math.acos(max(-1.0, min(1.0, -nrm[k, 2]))))
-                P.offer(cand[k], nrm[k], ContactReason.SURFACE,
-                        f"downward face ({tilt:.0f} deg from horizontal) at z={cand[k, 2]:.2f} mm, "
-                        f"more than {P.s:.1f} mm from any other contact",
-                        radius=P.s)
+            coarse_note = ""
+            if P.stats.get("residual_pitch_capped"):
+                coarse_note = (f"; residual lattice coarsened to {P.stats['residual_pitch']:.2f} mm "
+                               f"(more than {RESIDUAL_MAX_SAMPLES} samples at the nominal pitch)")
+
+            def residual_note(_k, pos, nrm):
+                tilt = math.degrees(math.acos(max(-1.0, min(1.0, -nrm[2]))))
+                return (f"downward face ({tilt:.0f} deg from horizontal) at z={pos[2]:.2f} mm, "
+                        f"more than {P.s:.1f} mm from any other contact" + coarse_note)
+
+            P.offer_stream(cand, cf, min(0.25 * P.s, 0.6), ContactReason.SURFACE, P.s, residual_note,
+                           lambda i, n: progress.update(0.8 + 0.2 * i / max(1, n),
+                                                        "Checking overhanging faces"))
 
     progress.update(1.0, f"{len(P.out)} contacts placed")
     if isinstance(analysis.stats, dict):

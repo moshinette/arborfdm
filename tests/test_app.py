@@ -297,3 +297,174 @@ def test_export_3mf(app, window, stl_path, tmp_path):
     assert out.exists(), window.last_error
     title, text = window.last_info
     assert "Disable the slicer's own supports" in text
+
+
+# ---------------------------------------------------------------------------
+# QA-3 / QA-6 / QA-11 / QA-13 (docs/QA_REVIEW.md)
+# ---------------------------------------------------------------------------
+EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+
+
+def _slow_generation(monkeypatch, seconds=0.6):
+    from arbor.app import main_window as mw
+    real = mw.run_generation if _engine_ok() else _stand_in
+
+    def slow(progress, **kw):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            progress.update(0.01, "slow")
+            time.sleep(0.01)
+        return real(progress=progress, **kw)
+    monkeypatch.setattr(mw, "run_generation", slow)
+
+
+def test_model_locked_and_banner_while_computing(app, window, monkeypatch, stl_path):
+    """QA-3: the model controls are locked with a visible reason while a task runs."""
+    _slow_generation(monkeypatch)
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    L = window.left
+    assert all(w.isEnabled() for w in L.model_widgets() if w is not L.orient_list)
+    assert window.generate_full()
+    assert window.runner.is_running()
+    assert not any(w.isEnabled() for w in L.model_widgets())
+    assert not L.import_button.isEnabled()
+    assert "locked" in L.model_group.title()
+    assert window.view.banner_kind == "busy" and window.view.banner.isVisibleTo(window)
+    assert "locked" in window.view.banner.text()
+    wait_for(app, window, timeout=300)
+    assert all(w.isEnabled() for w in L.model_widgets() if w is not L.orient_list)
+    assert window.view.banner_kind != "busy"
+
+
+def test_param_change_during_run_marks_result_stale_and_export_uses_used_params(
+        app, window, monkeypatch, stl_path, tmp_path):
+    """QA-3: a parameter changed while computing: result kept but flagged out of date; the
+    export metadata are the parameters that built the geometry."""
+    pytest.importorskip("arbor.io.export")
+    import json
+    import re
+    import zipfile
+    _slow_generation(monkeypatch)
+    window.open_path(str(stl_path))
+    wait_for(app, window)
+    p = window.project
+    used_tip = p.params.tip_diameter
+    assert window.generate_full()
+    window.right.fields["tip_diameter"].widget.setValue(used_tip + 0.2)
+    wait_for(app, window, timeout=300)
+    assert p.result is not None
+    assert p.result_params.tip_diameter == pytest.approx(used_tip)
+    assert "tip_diameter" in p.result_param_changes()
+    assert p.result_is_stale and window.act_generate.text().endswith("*")
+    assert window.view.banner_kind == "stale" and "tip_diameter" in window.view.banner.text()
+    assert "parameters changed during the computation" in window.status_msg.text()
+    out = tmp_path / "stale.3mf"
+    window.path_provider = lambda *a: str(out)
+    window.export_3mf()
+    wait_for(app, window)
+    m = zipfile.ZipFile(out).read("3D/3dmodel.model").decode()
+    meta = json.loads(re.search(r'name="arbor:support_params">([^<]*)<', m).group(1)
+                      .replace("&quot;", '"'))
+    assert meta["tip_diameter"] == pytest.approx(used_tip)
+    assert "Parameters changed" in window.last_info[1] and "WARNING" in window.status_msg.text()
+    # undo of the parameter: the result matches again
+    p.set_param("tip_diameter", used_tip)
+    assert not p.result_is_stale and window.view.banner_kind == ""
+
+
+def test_contact_edits_during_branch_rebuild_are_replayed(app):
+    """QA-3 at document level: edits made while 'Rebuild branches' runs are kept."""
+    from arbor.core.project import Project
+    from arbor.engine.types import AnalysisResult, GenerationResult, SupportTree
+    p = Project()
+    p.set_model(overhang_model(), name="m")
+    a = p.add_manual_contact((8, 0, 9), (0, 0, -1))
+    b = p.add_manual_contact((9, 0, 9), (0, 0, -1))
+    req = p.regenerate(full=False)
+    assert req.mode == "branches"
+    p.remove_contact(a.id)                                  # edits while "computing"
+    p.edit_contact(b.id, tip_diameter=0.9)
+    c = p.add_manual_contact((10, 0, 9), (0, 0, -1))
+    assert not p.is_request_current(req)
+    res = GenerationResult(req.kwargs["contacts"], SupportTree(), trimesh.creation.box((1, 1, 1)),
+                           None, [], AnalysisResult(0.2, np.zeros(0)), {})
+    assert p.apply_result(res, req)
+    assert p.contact(a.id) is None
+    assert p.contact(b.id).tip_diameter == pytest.approx(0.9)
+    assert p.contact(c.id) is not None
+    assert p.contacts_edited and p.result_is_stale and p.last_apply.stale
+    p.undo()                                                # back to the edited state
+    assert p.result is None and p.contact(a.id) is None and p.contact(c.id) is not None
+
+
+def test_broken_mesh_warns_before_generating(app, window):
+    """QA-6: a mesh with errors is reported at load and before generating; nothing is
+    repaired without the user's choice; the result carries an invalid_model_mesh issue."""
+    path = os.path.join(EXAMPLES, "broken_hole.stl")
+    window.open_path(path)
+    wait_for(app, window)
+    p = window.project
+    assert p.mesh_problems()
+    assert "error" in window.status_msg.text() and "Repair" in window.status_msg.text()
+    assert window.view.banner_kind == "mesh"
+    assert "repair" in window.left.mesh_report.text().lower()
+    box = window.broken_mesh_box()
+    assert {b.text() for b in box.buttons()} >= {"Repair, then generate", "Generate anyway"}
+    box.deleteLater()
+    window.broken_mesh_choice = "cancel"
+    assert not window.generate_full() and not window.runner.is_running()
+    assert "mesh has errors" in window.status_msg.text()
+    window.broken_mesh_choice = "generate"
+    assert window.generate_full()
+    assert "WARNING" in window.status_msg.text()
+    wait_for(app, window, timeout=300)
+    assert not p.base_is_repaired and p.base_mesh is not None
+    assert np.array_equal(p.base_mesh.faces, p.imported_mesh.faces)     # untouched
+    codes = [i.code for i in p.result.issues]
+    assert "invalid_model_mesh" in codes
+    texts = [window.right.issue_list.item(k).text() for k in range(window.right.issue_list.count())]
+    assert any("mesh has errors" in t for t in texts)
+    # "Repair, then generate": repair (undoable copy), then generation on the repaired mesh
+    window.broken_mesh_choice = "repair"
+    assert window.generate_full()
+    wait_for(app, window, timeout=300)
+    assert p.base_is_repaired and not p.mesh_problems()
+    assert p.result is not None
+    assert "invalid_model_mesh" not in [i.code for i in p.result.issues]
+
+
+def test_picking_structure_built_in_background(app):
+    """QA-11: large meshes get their picking structure in a background thread; hover does
+    not block while it builds; once built, hits match trimesh exactly."""
+    from arbor.app import picking
+    from arbor.app.viewport import Viewport
+    m = trimesh.creation.icosphere(subdivisions=6, radius=20)     # 81 920 faces
+    m.apply_translation([0, 0, 20])
+    assert len(m.faces) > picking.SYNC_BUILD_MAX_FACES
+    vp = Viewport()
+    vp.resize(800, 600)
+    t0 = time.perf_counter()
+    vp.set_model(m, fit=True)
+    assert time.perf_counter() - t0 < 1.0
+    end = time.monotonic() + 30
+    while not vp.picker_ready() and time.monotonic() < end:
+        assert vp.pick_model(400, 300, wait=False) is None or vp.picker_ready()
+        time.sleep(0.005)
+    assert vp.picker_ready()
+    rng = np.random.default_rng(3)
+    for _ in range(30):
+        x, y = rng.uniform(250, 550), rng.uniform(150, 450)
+        hit = vp.pick_model(x, y)
+        o, d = vp.camera_ray(x, y)
+        locs, _, _ = m.ray.intersects_location([o], [d], multiple_hits=True)
+        if len(locs) == 0:
+            assert hit is None
+            continue
+        best = locs[np.argmin((locs - o) @ d)]
+        assert hit is not None and np.allclose(hit[0], best, atol=1e-6)
+        assert np.dot(hit[1], d) < 0
+    t0 = time.perf_counter()
+    for _ in range(20):
+        vp.pick_model(400, 300)
+    assert (time.perf_counter() - t0) / 20 < 0.05

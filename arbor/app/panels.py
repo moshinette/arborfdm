@@ -234,6 +234,7 @@ class LeftPanel(QtWidgets.QWidget):
 
         # --- transform -----------------------------------------------------------
         g, lay = _group("Orientation and size")
+        self.model_group = g
         f = _form()
         rot_row = QtWidgets.QHBoxLayout()
         rot_row.setSpacing(4)
@@ -287,6 +288,7 @@ class LeftPanel(QtWidgets.QWidget):
 
         # --- mesh check ------------------------------------------------------------
         g, lay = _group("Mesh check")
+        self.mesh_group = g
         row = QtWidgets.QHBoxLayout()
         self.check_button = QtWidgets.QPushButton("Check")
         self.check_button.clicked.connect(self.checkRequested)
@@ -372,9 +374,27 @@ class LeftPanel(QtWidgets.QWidget):
             self.load_warning.show()
         else:
             self.load_warning.hide()
-        for w in (self.plate_button, self.orient_button, self.check_button, self.repair_button,
-                  self.scale_spin, self.height_spin, *self.rot_spins):
-            w.setEnabled(has)
+        self._apply_enabled()
+
+    def model_widgets(self) -> list[QtWidgets.QWidget]:
+        """Controls that change the model geometry (locked while a task runs: QA-3)."""
+        return [self.plate_button, self.orient_button, self.check_button, self.repair_button,
+                self.scale_spin, self.height_spin, *self.rot_spins, self.orient_list]
+
+    def set_busy(self, busy: bool) -> None:
+        self._busy = bool(busy)
+        self._apply_enabled()
+
+    def _apply_enabled(self) -> None:
+        has = self.project.has_model
+        busy = getattr(self, "_busy", False)
+        for w in self.model_widgets():
+            w.setEnabled(has and not busy)
+        self.import_button.setEnabled(not busy)
+        tip = ("Locked while a computation runs (the model must not change under it)"
+               if busy else "")
+        self.model_group.setToolTip(tip)
+        self.model_group.setTitle("Orientation and size" + ("  (locked: computing)" if busy else ""))
 
     def refresh_transform(self) -> None:
         p = self.project
@@ -639,10 +659,15 @@ class RightPanel(QtWidgets.QWidget):
         self.issue_list.clear()
         sev_order = {"error": 0, "warning": 1, "info": 2}
         icons = {"error": theme.ERROR, "warning": theme.WARNING, "info": theme.TEXT_DIM}
-        for i in sorted(self._issues, key=lambda i: sev_order.get(i.severity, 3)):
+        # indexes come from enumerate: Issue holds numpy arrays, list.index / == on it is
+        # ambiguous and two identical messages are legitimate (QA-7)
+        order = sorted(range(len(self._issues)),
+                       key=lambda k: (sev_order.get(self._issues[k].severity, 3), k))
+        for idx in order:
+            i = self._issues[idx]
             item = QtWidgets.QListWidgetItem(f"{i.severity.upper()}  {i.message}")
             item.setForeground(QtGui.QBrush(QtGui.QColor(icons.get(i.severity, theme.TEXT))))
-            item.setData(QtCore.Qt.UserRole, self._issues.index(i))
+            item.setData(QtCore.Qt.UserRole, idx)
             if i.position is None and i.contact_id is None:
                 item.setToolTip("No position attached")
             self.issue_list.addItem(item)

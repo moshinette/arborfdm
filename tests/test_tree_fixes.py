@@ -38,10 +38,10 @@ def overlap(support_mesh, solid: mf.Manifold) -> float:
     return (build.trimesh_to_manifold(support_mesh) ^ solid).volume()
 
 
-def _router(mesh, contact_pos):
+def _router(mesh, contact_pos, z_base: float = 0.0):
     c = Contact(0, np.asarray(contact_pos, float), np.array([0.0, 0.0, -1.0]), ContactReason.MANUAL)
     tree = SupportTree()
-    T._init_tree_extras(tree, 0.0)
+    T._init_tree_extras(tree, z_base)
     r = T._Router(mesh, [c], prm(), tree, Progress())
     r._prepare()
     r.landed, r.fail_nodes = [], {}
@@ -185,3 +185,27 @@ def test_ray_down_is_exact():
     assert r._ray_down(np.array([20.0, 0.0, 5.0])) is None
     fl = r._floor_below(np.array([4.75, 0.0, 2.15]))
     assert fl is not None and fl[0] == pytest.approx(2.0, abs=1e-6) and not fl[1]
+
+
+# ---------------------------------------------------------------------------
+# QA-9: routing levels shift with z_base (raft); tip clearance must not depend on it
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("z_base", [0.0, 0.8])
+def test_tip_base_clearance_ignores_material_below_its_segment(z_base):
+    """A ledge top 1.5 mm under a vertical tip base, 0.5 mm aside: the base and its first
+    segment never reach the ledge, whatever the level offset (raft or not)."""
+    ledge = S._to_trimesh(S._box((0, -5, 0), (10, 5, 10)))
+    r = _router(ledge, (10.5, 0.0, 13.1), z_base=z_base)
+    c = r._base_clearance(np.array([10.5, 0.0, 13.1]), np.array([0.0, 0.0, -1.0]))
+    assert c > 2.0, c
+
+
+def test_raft_keeps_every_figurine_contact_routed():
+    p = prm()
+    m = S.figurine()
+    a = pipeline.generate(m.copy(), p)
+    b = pipeline.generate(m.copy(), p.updated(raft_enabled=True))
+    assert not a.tree.failed and not b.tree.failed, b.tree.failed
+    n = sum(c.enabled for c in b.contacts)
+    assert overlap(b.support_mesh, build.trimesh_to_manifold(m)) <= _budget(n, p)
+    assert b.support_mesh.bounds[0, 2] >= p.raft_thickness - 1e-3

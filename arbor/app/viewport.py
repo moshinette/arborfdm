@@ -19,9 +19,11 @@ from pyqtgraph.opengl import shaders
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import theme
+from .picking import BackgroundPicker
 
 CLICK_TOLERANCE_PX = 5          # a press/release closer than this is a click, not a drag
 CONTACT_PICK_RADIUS_PX = 9
+HOVER_INTERVAL_MS = 40          # hover picking is deferred and coalesced (QA-11)
 
 # depth test off: markers always visible through the model
 OVERLAY_GL = {GL.GL_DEPTH_TEST: False, GL.GL_BLEND: True, GL.GL_CULL_FACE: False,
@@ -160,6 +162,7 @@ class Viewport(gl.GLViewWidget):
         self._press_pos: Optional[QtCore.QPointF] = None
         self._press_button = None
         self._hover_pos: Optional[QtCore.QPointF] = None
+        self._picker: Optional[BackgroundPicker] = None
 
         self.grid = gl.GLGridItem(color=theme.GRID_COLOR)
         self.grid.setSize(200, 200)
@@ -200,7 +203,7 @@ class Viewport(gl.GLViewWidget):
         self.addItem(self.ghost_item)
 
         self.legend = Legend(self)
-        self._hover_timer = QtCore.QTimer(self, singleShot=True, interval=25)
+        self._hover_timer = QtCore.QTimer(self, singleShot=True, interval=HOVER_INTERVAL_MS)
         self._hover_timer.timeout.connect(self._update_hover)
         self._clip_timer = QtCore.QTimer(self, singleShot=True, interval=60)
         self._clip_timer.timeout.connect(self._rebuild_geometry)
@@ -225,6 +228,10 @@ class Viewport(gl.GLViewWidget):
 
     # ------------------------------------------------------------------ data
     def set_model(self, mesh: Optional[trimesh.Trimesh], fit: bool = False) -> None:
+        if mesh is not self.model_mesh:
+            # acceleration structure for picking: built once per mesh, in a background
+            # thread for large meshes (the UI thread never builds it)
+            self._picker = BackgroundPicker(mesh) if mesh is not None and len(mesh.faces) else None
         self.model_mesh = mesh
         self._update_grid(mesh)
         self._rebuild_geometry()
@@ -418,33 +425,34 @@ class Viewport(gl.GLViewWidget):
         px = np.c_[(ndc[:, 0] + 1) * 0.5 * self.width(), (1 - ndc[:, 1]) * 0.5 * self.height()]
         return px, front
 
-    def pick_model(self, x: float, y: float) -> Optional[tuple[np.ndarray, np.ndarray, int]]:
-        """Exact hit on the model mesh: (position, outward face normal, face index)."""
+    def picker_ready(self) -> bool:
+        return self._picker is None or self._picker.ready
+
+    def pick_model(self, x: float, y: float, wait: bool = True
+                   ) -> Optional[tuple[np.ndarray, np.ndarray, int]]:
+        """Exact hit on the model mesh: (position, outward face normal, face index).
+
+        wait=False (hover) returns None while the picking structure is still being built
+        in the background instead of blocking the UI thread."""
         mesh = self.model_mesh
-        if mesh is None or self.view_mode == "supports":
+        if mesh is None or self.view_mode == "supports" or self._picker is None:
+            return None
+        picker = self._picker.picker if not wait else self._picker.wait()
+        if picker is None:
             return None
         origin, direction = self.camera_ray(x, y)
-        try:
-            locs, _, tri = mesh.ray.intersects_location([origin], [direction], multiple_hits=True)
-        except Exception:
-            return None
-        if len(locs) == 0:
-            return None
-        dist = (locs - origin) @ direction
-        order = np.argsort(dist)
-        for k in order:
-            if dist[k] <= 0:
-                continue
+        locs, dist, tri = picker.intersect(origin, direction)
+        for k in range(len(dist)):
             if self.clip_z is not None and locs[k][2] > self.clip_z + 1e-6:
                 continue        # clipped away: the ray continues to the visible part
-            n = np.asarray(mesh.face_normals[tri[k]], float)
+            n = picker.face_normal(int(tri[k]))
             if np.dot(n, direction) > 0:
                 n = -n          # the visible side faces the camera
             return np.asarray(locs[k], float), n, int(tri[k])
         return None
 
-    def pick_contact(self, x: float, y: float, radius_px: float = CONTACT_PICK_RADIUS_PX
-                     ) -> Optional[int]:
+    def pick_contact(self, x: float, y: float, radius_px: float = CONTACT_PICK_RADIUS_PX,
+                     wait: bool = True) -> Optional[int]:
         cs = self._visible_contacts()
         if not cs:
             return None
@@ -455,7 +463,7 @@ class Viewport(gl.GLViewWidget):
         k = int(np.argmin(d))
         if d[k] > radius_px:
             return None
-        hit = self.pick_model(x, y)
+        hit = self.pick_model(x, y, wait=wait)
         if hit is not None:
             cam = self.camera_ray(x, y)[0]
             if np.linalg.norm(hit[0] - cam) + 0.5 < np.linalg.norm(cs[k].position - cam):
@@ -528,8 +536,9 @@ class Viewport(gl.GLViewWidget):
         if self._hover_pos is None:
             return
         x, y = self._hover_pos.x(), self._hover_pos.y()
-        hit = self.pick_model(x, y) if (self.ghost_enabled and self.edit_enabled) else None
-        if hit is None or self.pick_contact(x, y) is not None:
+        hit = (self.pick_model(x, y, wait=False) if (self.ghost_enabled and self.edit_enabled)
+               else None)
+        if hit is None or self.pick_contact(x, y, wait=False) is not None:
             if self.ghost_item.visible():
                 self.ghost_item.hide()
                 self.update()
@@ -598,6 +607,13 @@ class ViewportContainer(QtWidgets.QWidget):
                                 "border-radius: 4px; padding: 3px 8px; font-size: 8.5pt;")
         self.hint.adjustSize()
         self.hint.move(10, 10)
+        # state banner: computation running, supports out of date, mesh with errors
+        self.banner = QtWidgets.QLabel("", self.viewport)
+        self.banner.setObjectName("banner")
+        self.banner.setWordWrap(True)
+        self.banner.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.banner.hide()
+        self.banner_kind = ""
 
         side = QtWidgets.QFrame(objectName="viewbar")
         sl = QtWidgets.QVBoxLayout(side)
@@ -626,6 +642,39 @@ class ViewportContainer(QtWidgets.QWidget):
         lay.setSpacing(0)
         lay.addWidget(bar)
         lay.addLayout(mid, 1)
+
+    BANNER_STYLE = {
+        "busy": ("rgba(40,62,98,230)", "#cfe0ff", "#4f7fd0"),
+        "stale": ("rgba(92,66,16,235)", "#ffe2a8", "#d39b2a"),
+        "mesh": ("rgba(98,36,36,235)", "#ffd0d0", "#d05050"),
+    }
+
+    def set_banner(self, text: str, kind: str = "") -> None:
+        """Persistent message over the 3D view (empty text hides it)."""
+        self.banner_kind = kind if text else ""
+        if not text:
+            self.banner.hide()
+            self.banner.setText("")
+            return
+        bg, fg, border = self.BANNER_STYLE.get(kind, self.BANNER_STYLE["stale"])
+        self.banner.setStyleSheet(f"background: {bg}; color: {fg}; border: 1px solid {border};"
+                                  " border-radius: 5px; padding: 5px 9px; font-size: 9pt;")
+        self.banner.setText(text)
+        self._place_banner()
+        self.banner.show()
+        self.banner.raise_()
+
+    def _place_banner(self) -> None:
+        vp = self.viewport
+        w = max(200, vp.width() - 20)
+        self.banner.setFixedWidth(w)
+        self.banner.adjustSize()
+        self.banner.move(10, self.hint.y() + self.hint.height() + 6)
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        if self.banner.isVisible():
+            self._place_banner()
 
     def _on_clip(self, value: int) -> None:
         h = self.viewport.scene_height()
