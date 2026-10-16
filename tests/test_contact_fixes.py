@@ -11,6 +11,7 @@ overhang angle.
 from __future__ import annotations
 
 import math
+import sys
 from functools import lru_cache
 
 import manifold3d as mf
@@ -200,6 +201,7 @@ def test_fill_blocks_do_not_change_contacts(monkeypatch, spacing):
     assert np.array_equal(np.array([c.position for c in cs]), np.array([c.position for c in ref]))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="peak RSS needs the POSIX resource module")
 def test_min_spacing_contacts_peak_memory():
     """contact_spacing = 0.2 (minimum accepted by validate) on the 62k face figurine:
     measured ~470 MB peak RSS after the fix (> 4 GB, OOM, before)."""

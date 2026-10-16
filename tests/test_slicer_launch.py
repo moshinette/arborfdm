@@ -209,7 +209,7 @@ def test_mac_candidates_and_open_command(tmp_path):
     f = tmp_path / "a b.3mf"
     assert sl.launch_command(f, app, "darwin") == ["open", "-a", str(app), str(f)]
     assert sl.launch_command(f, app / "Contents/MacOS/OrcaSlicer", "darwin")[:3] == ["open", "-a", str(app)]
-    assert sl.launch_command(f, Path("/opt/orca"), "linux") == ["/opt/orca", str(f)]
+    assert sl.launch_command(f, Path("/opt/orca"), "linux") == [str(Path("/opt/orca")), str(f)]
 
 
 def test_to_slicer_dir_defaults(monkeypatch):
