@@ -202,3 +202,20 @@ Couverture des faces en surplomb (échantillons tous les 0,1 mm, distance au con
 Limites : la couronne est réduite d'environ un quart, pas supprimée : chaque pointe de 0,26 mm reste une suite de micro-boucles sur ses dernières couches, c'est inhérent à une pointe fine. Côté main, la couronne d'ancrage (7 pointes épaisses à 1 mm) est inchangée, par choix (elle tient la main, essai 2). La colonne de 40 mm qui porte la grappe n'est pas modifiée. Le lien entre ces chiffres et les fils observés n'est pas prouvé : à confirmer par impression.
 
 À regarder dans l'aperçu d'Orca avant d'imprimer : couches z = 40,5 à 42 côté épée (type de ligne « Support » de l'objet supports) ; une seule rangée de petites pastilles sous la partie fine de la lame, pas de pastilles soudées deux à deux ; dans la légende « Rétractions », le nombre de marques par couche dans cette zone. Si les fils persistent : réglages d'Orca sur l'objet supports seulement (rétraction, « Avoid crossing walls », ventilation) ; parois Arachne non testées ici.
+
+### Essai 4 : 2026-10-16, figurine d'exemple, version `aa2e8f8` (avant l'itération 0.3)
+
+| Élément | Valeur |
+|---|---|
+| Imprimante, buse | Bambu Lab A1 mini, 0,2 mm |
+| Trancheur | OrcaSlicer 2.4.2, 0.08mm Optimal |
+| Profil ArborFDM | `nozzle_02_normal`, raft activé (mode `feet`, seul mode de cette version), ancrage des mains et espacement des pointes de l'essai 3 |
+| Résultat | impression interrompue : un groupe de supports au bout du bras droit (deux colonnes reliées par une entretoise en X) a été renversé par la buse, plus haut que lors des essais précédents |
+
+Observations de l'utilisateur : dessous plats (bloc du torse) propres, surplombs « qui ont l'air bien ».
+
+Constat sur les photos : le groupe renversé s'est détaché du plateau d'un seul tenant, pieds compris (pas de rupture de colonne). Les couronnes de pointes en haut des colonnes des mains restent irrégulières (fils, amas).
+
+Analyse de la génération équivalente (mesurée, raft `feet`) : les arbres des bouts de bras mesurent 40 à 42 mm. Côté droit, trois arbres de 41-42 mm sont reliés entre eux par des entretoises, mais à rien d'autre ; côté gauche, aucun arbre de bras n'est entretoisé. Hypothèse la plus probable : un amas sur la couronne accroche la buse, et un groupe haut, isolé, ancré par des pieds de 6 mm sur un raft de 0,16 mm, bascule (bras de levier d'environ 40 mm).
+
+Ce que la version 0.3 change déjà pour ce cas : raft `footprint` (une plaque de 1599 mm² au lieu de 821 mm² sous le modèle et les pieds). Ce qu'elle ne change pas : les arbres hauts isolés ne sont pas entretoisés vers le reste de la structure (feuille de route, priorité 1), et les couronnes de pointes des mains.
