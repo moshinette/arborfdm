@@ -37,6 +37,16 @@ class SupportParams:
     min_contact_distance: float = 0.8     # contacts closer than this are merged
     contact_density: float = 1.0          # multiplier (>1 = more contacts)
     manual_only: bool = False             # only user-placed contacts are used
+    # Island anchoring (docs/ALGORITHM.md, "Ancrage des debuts d'ilots"): an island whose
+    # first layer is much smaller than its footprint island_anchor_height higher (round
+    # bottom that starts in a point: hand, ball, tip of a tail) gets a ring of 6 contacts
+    # of radius island_anchor_spacing around its lowest point, on that footprint, and
+    # these contacts plus the island's own contact get thicker tips (island_tip_diameter,
+    # ~2.5 line widths, so that the slicer still extrudes the top of the tip).
+    # island_anchor_height = 0 disables the anchoring.
+    island_anchor_height: float = 1.0
+    island_anchor_spacing: float = 1.2
+    island_tip_diameter: float = 1.0
 
     # --- tips ---------------------------------------------------------------
     tip_diameter: float = 0.45            # diameter where the tip touches the model
@@ -136,6 +146,12 @@ class SupportParams:
             p.append("overhang_angle_deg out of range [10, 89]")
         if self.tip_diameter < 0.5 * self.nozzle_diameter:
             p.append("tip_diameter below half the nozzle diameter is not printable")
+        if self.island_anchor_height < 0:
+            p.append("island_anchor_height must be >= 0")
+        if self.island_anchor_spacing <= 0:
+            p.append("island_anchor_spacing must be > 0")
+        if self.island_tip_diameter < 0.5 * self.nozzle_diameter:
+            p.append("island_tip_diameter below half the nozzle diameter is not printable")
         if self.tip_base_diameter < self.tip_diameter:
             p.append("tip_base_diameter must be >= tip_diameter")
         if self.branch_min_diameter > self.branch_max_diameter:

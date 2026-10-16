@@ -16,7 +16,8 @@ Checks (code -> meaning):
   model_collision      supports overlap the model more than the tips' allowed penetration
   below_plate          support geometry under z = 0
   invalid_support_mesh the merged support mesh is not a closed 2-manifold
-  contacts_too_close   two active contacts closer than min_contact_distance
+  contacts_too_close   two active contacts (one manual) closer than the effective
+                       spacing max(min_contact_distance, tip_base_diameter + line_width)
   invalid_model_mesh   the input model is not closed / consistently oriented (warning)
   support_floating_region  the supports sliced alone, layer by layer like a slicer: a
                        support part starting in the air (error) or overhanging beyond the
@@ -43,7 +44,7 @@ import trimesh
 from scipy.spatial import cKDTree
 
 from .params import SupportParams
-from .types import AnalysisResult, Contact, Issue, NodeKind, Progress, SupportTree
+from .types import AnalysisResult, Contact, ContactReason, Issue, NodeKind, Progress, SupportTree
 
 PLATE_EPS = 0.3          # a foot is on the plate if within this of z_base
 SLENDER_RATIO = 18.0     # column height / foot radius above which a trunk is flagged
@@ -272,9 +273,11 @@ def _check_mesh(mesh, support_mesh, tree, contacts, params, issues, support_man=
                             "The model is not a closed manifold, overlap between supports and model "
                             "could not be measured (repair the mesh to enable this check)"))
         return
-    n = sum(1 for c in contacts if c.enabled)
-    r = params.tip_base_diameter / 2
-    budget = n * np.pi * r * r * (params.tip_penetration + 0.1) + 0.2
+    # per contact: tip base radius, widened for thicker tips (tree.tip_base_r)
+    taper = 0.5 * max(params.tip_base_diameter - params.tip_diameter, 0.0)
+    r2 = sum(max(params.tip_base_diameter / 2, 0.5 * (c.tip_diameter or params.tip_diameter) + taper) ** 2
+             for c in contacts if c.enabled)
+    budget = np.pi * r2 * (params.tip_penetration + 0.1) + 0.2
     if vol > budget:
         from .build import manifold_to_trimesh
         pos = None
@@ -587,8 +590,10 @@ def _check_spacing(contacts, params, issues):
     act = [c for c in contacts if c.enabled]
     if len(act) < 2:
         return
+    from .contacts import effective_min_contact_distance
+    dmin = effective_min_contact_distance(params)
     P = np.array([c.position for c in act], float)
-    pairs = cKDTree(P).query_pairs(params.min_contact_distance * 0.999)
+    pairs = cKDTree(P).query_pairs(dmin * 0.999)
     reported = 0
     for i, j in sorted(pairs):
         if reported >= 20:
@@ -599,7 +604,8 @@ def _check_spacing(contacts, params, issues):
         d = float(np.linalg.norm(P[i] - P[j]))
         issues.append(Issue("warning", "contacts_too_close",
                             f"Contacts {a.id} and {b.id} are {d:.2f} mm apart "
-                            f"(min {params.min_contact_distance:.2f}): tips may fuse",
+                            f"(min {dmin:.2f}: tip base diameter + one line width): their "
+                            "tips would fuse into slivers and micro islands in the slicer",
                             P[i].copy(), a.id))
         reported += 1
 
@@ -851,7 +857,7 @@ def _clusters(points: np.ndarray, link: float) -> list[list[int]]:
     return list(groups.values())
 
 
-def _check_removal(mesh, tree: SupportTree, params: SupportParams, issues):
+def _check_removal(mesh, tree: SupportTree, params: SupportParams, issues, exempt_ids=()):
     """hard_to_remove, (1) supports standing on the model in enclosed or narrow places,
     (2) contacts so dense that their marks cover a large part of a small area."""
     P = params
@@ -902,7 +908,12 @@ def _check_removal(mesh, tree: SupportTree, params: SupportParams, issues):
                     first[0].position.copy(), first[3]))
 
     # (2) dense contact marks ------------------------------------------------------------
-    marks = [n for n in tree.nodes.values() if n.kind in (NodeKind.TIP, NodeKind.MODEL_FOOT)]
+    # island anchors (contacts.ANCHOR_*) are dense on purpose: their ring around the
+    # lowest point of an island is the trade-off chosen to keep its first layers on the
+    # supports (docs/ALGORITHM.md), so they are not counted here (still in contact_area)
+    exempt = set(exempt_ids)
+    marks = [n for n in tree.nodes.values() if n.kind in (NodeKind.TIP, NodeKind.MODEL_FOOT)
+             and not (n.kind == NodeKind.TIP and n.contact_id in exempt)]
     if len(marks) < MARK_MIN_CONTACTS:
         return
     X = np.array([n.position for n in marks], float)
@@ -1001,7 +1012,9 @@ def verify(mesh: trimesh.Trimesh, analysis: AnalysisResult, contacts: list[Conta
     _check_model_feet(mesh, tree, params, issues)
     _check_spacing(contacts, params, issues)
     _check_fragile(tree, params, issues)
-    _check_removal(mesh, tree, params, issues)
+    anchors = {c.id for c in contacts if not c.manual and c.reason == ContactReason.ISLAND
+               and ("island anchor" in c.note)}
+    _check_removal(mesh, tree, params, issues, anchors)
     progress.update(0.55, "Checking meshes")
     support_man = None
     if support_mesh is not None and len(getattr(support_mesh, "faces", [])):

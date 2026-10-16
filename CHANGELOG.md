@@ -17,6 +17,9 @@ First public release. Profiles are still **not validated by systematic print tes
 - GitHub Actions: tests on Linux and Windows (`tests.yml`), Windows build and draft release with SHA-256 checksums on `v*` tags (`release.yml`).
 
 ### Changed
+- Tips are never closer than their base width plus one line width (0.92 mm with the 0.2 mm nozzle), and narrow parts (a sword blade) get one central row of contacts instead of one per edge: the crowns of tiny tips under the hands printed as strings (2nd print, OrcaSlicer G-code measured before/after, `docs/PHYSICAL_TESTS.md`).
+- With a raft, the default 3MF export (GUI and CLI) now uses the separate-objects layout: slicers that drop every object to the bed lowered the supports by the raft thickness, leaving air under every tip.
+- Islands that start in a point (round bottom of a hand, a ball) are anchored by a ring of 6 thicker contacts around their lowest point (`island_anchor_height`, `island_anchor_spacing`, `island_tip_diameter`), after a print where both hands of the figurine failed.
 - After the first real prints: thinner single-piece raft, feet scaled with tree height, sturdier branches for the 0.2 mm nozzle, thicker diagonal braces (0.2: 0.5 to 0.9 mm, 0.4: 0.8 to 1.2 mm), zero-volume fragments dropped.
 - Supported Python is now declared as 3.10.1 to 3.14 (`manifold3d` has no wheel for 3.15+, Python 3.10.0 crashes PyInstaller). Minimum dependency versions raised to versions that pass the test suite (see `pyproject.toml`).
 - Version is defined once in `arbor/__init__.py`.

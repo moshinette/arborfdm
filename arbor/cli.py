@@ -425,6 +425,13 @@ def cmd_generate(args, out: _Out) -> int:
     if args.profile not in profiles:
         raise CliError(f"unknown profile {args.profile!r}; available: {', '.join(profiles)}")
     params = apply_overrides(profiles[args.profile].params, args.set or [])
+    if args.layout is None:
+        # With a raft the supports start above the plate: slicers that drop every object on
+        # the bed (Orca, Bambu, Prusa) would lower them by the raft thickness and leave air
+        # under every tip. "separate" keeps them aligned (docs/SLICERS.md, docs/PHYSICAL_TESTS.md).
+        args.layout = "separate" if params.raft_enabled else "objects"
+        sep_output = (out_path is not None and args.layout == "separate"
+                      and out_path.suffix.lower() == ".3mf")
     report: dict[str, Any] = {"input": str(Path(args.input).resolve()), "profile": args.profile,
                               "overrides": list(args.set or []), "params": params.to_dict()}
     t0 = time.perf_counter()
@@ -639,8 +646,9 @@ def make_parser() -> argparse.ArgumentParser:
                    help="repair a copy of the mesh if it is not a valid closed solid")
     g.add_argument("--auto-orient", action="store_true",
                    help="apply the best automatic orientation before generating")
-    g.add_argument("--layout", choices=("objects", "components", "separate"), default="objects",
-                   help="3MF layout: one build item per part (default), one assembly "
+    g.add_argument("--layout", choices=("objects", "components", "separate"), default=None,
+                   help="3MF layout (default: separate when a raft is generated, else objects): "
+                        "one build item per part (objects), one assembly "
                         "(components), or separate objects that each rest on the plate, raft "
                         "merged with the supports (separate: for OrcaSlicer / Bambu Studio)")
     g.add_argument("--model-layer-height", type=float, metavar="MM",

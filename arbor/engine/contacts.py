@@ -5,11 +5,19 @@ accepted contact already covers them):
 
   0. manual contacts (kept unchanged; they also cover their neighbourhood)
   1. one mandatory contact per island (an island without support prints in the air)
+  1b. island anchors: an island that starts in a point (first layer area <=
+     ANCHOR_START_RATIO x its footprint island_anchor_height higher: round
+     bottom of a hand, a ball) gets a ring of 6 contacts of radius
+     island_anchor_spacing around its lowest point, on that footprint, with
+     thicker tips (island_tip_diameter, also given to its mandatory contact).
+     See _anchor_islands() and island_anchor_footprint().
   2. low points (local Z minima: arm tips, chin, ...)
   3. corners of flat overhangs
   4. rows along hanging edges: segments are chained into polylines (cut at
      turns > EDGE_BREAK_DEG) and sampled evenly, ends included, with a gap
-     <= edge_spacing / contact_density (independent of the tessellation)
+     <= edge_spacing / contact_density (independent of the tessellation); on a
+     part narrower than narrow_width_limit() (blade, strap) the samples are moved
+     to the middle of the part: one central row instead of one per edge
   5. island fill + overhang fill from the sliced regions, hex grid at
      contact_spacing / contact_density (thin slope strips are sampled along
      their outline instead)
@@ -20,7 +28,8 @@ accepted contact already covers them):
 Samples below one layer height lie on the plate and are never kept.
 
 Coverage rule: a candidate is skipped when an accepted contact lies within
-min_contact_distance (any kind) or within the coverage radius of its kind:
+effective_min_contact_distance() = max(min_contact_distance, tip_base_diameter +
+line_width) (any kind; island contacts and anchors use min_contact_distance) or within the coverage radius of its kind:
 0.55 x spacing for edge and surface candidates. Grid neighbours (distance =
 spacing) therefore survive, while redundant samples are removed; along a
 densely sampled line the resulting gaps lie in [0.55, 1.1] x spacing.
@@ -68,6 +77,9 @@ CAST_POINT_BLOCK = 8192    # points per KD-tree query block in VerticalCaster.ca
 CAST_MAX_PAIRS = 2_000_000  # max (point, triangle) pairs tested at once
 EDGE_BREAK_DEG = 45.0     # a hanging edge polyline is cut where it turns more than this
 RESIDUAL_PITCH = 0.2       # lattice pitch of the residual check, fraction of contact spacing
+# island anchoring (step 1b)
+ANCHOR_START_RATIO = 0.5   # anchored if first layer area <= this x footprint area at the anchor height
+ANCHOR_COVER = 0.55        # coverage radius of an anchor contact, fraction of the ring radius
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +461,123 @@ def _mask_components(f: np.ndarray, mask: np.ndarray, nv: int):
     return ids, labels
 
 
+def _parts(geom) -> list:
+    if geom is None or geom.is_empty:
+        return []
+    return [g for g in shapely.get_parts(geom) if not g.is_empty and g.area > 0]
+
+
+def island_anchor_footprint(analysis: AnalysisResult, region, height: float):
+    """Footprint of an island over its first `height` mm, from the sliced layers.
+
+    Returns (first, footprint, z_top) or None: `first` is the island in its first
+    layer, `footprint` the union of its cross sections up to z_top (last layer used,
+    <= region.z + height). The island is followed layer by layer (components that
+    touch the previous selection); the walk stops before the first layer where it
+    merges with material that is not part of it (an arm, another island): from there
+    it is held by that material, and a footprint including it would put anchor
+    contacts under an unrelated part. None when the per layer polygons are missing."""
+    lp = analysis.layer_polygons
+    lz = np.asarray(analysis.layer_z, dtype=float)
+    if lp is None or len(lz) == 0 or len(lp) != len(lz) or height <= 0:
+        return None
+    i0 = int(np.argmin(np.abs(lz - region.z)))
+    parts = _parts(lp[i0])
+    sel = [k for k, g in enumerate(parts) if g.intersects(region.polygon)]
+    if not sel:
+        return None
+    first = shapely.union_all([parts[k] for k in sel])
+    acc = [first]
+    z_top = float(lz[i0])
+    prev_parts, prev_sel = parts, set(sel)
+    i = i0 + 1
+    while i < len(lz) and lz[i] <= region.z + height + 1e-9:
+        cur = _parts(lp[i])
+        if not cur:
+            break
+        nxt = []
+        merged = False
+        for k, g in enumerate(cur):
+            touch = {j for j, q in enumerate(prev_parts) if g.intersects(q)}
+            if touch & prev_sel:
+                nxt.append(k)
+                if touch - prev_sel:
+                    merged = True
+        if merged or not nxt:
+            break
+        acc.extend(cur[k] for k in nxt)
+        z_top = float(lz[i])
+        prev_parts, prev_sel = cur, set(nxt)
+        i += 1
+    return first, shapely.union_all(acc), z_top
+
+
+def effective_min_contact_distance(params: SupportParams) -> float:
+    """Smallest distance kept between two automatic contacts (docs/ALGORITHM.md, section 2).
+
+    max(min_contact_distance, tip_base_diameter + line_width): two tips closer than
+    that have bases that overlap or leave a slit narrower than one extrusion line, and
+    the slicer prints the pair as fused slivers and micro islands (gap fill, extra
+    retractions) instead of two clean cones (docs/PHYSICAL_TESTS.md, essai 3). Island
+    anchors (step 1b) are a deliberate cluster and keep min_contact_distance."""
+    return max(float(params.min_contact_distance),
+               float(params.tip_base_diameter) + float(params.line_width))
+
+
+def narrow_width_limit(params: SupportParams) -> float:
+    """Width below which a part gets one central row of edge contacts instead of one row
+    per hanging edge: 2 sqrt(r^2 - (g/2)^2) with r = COVER_FACTOR x contact spacing (the
+    coverage radius of the surface fill) and g the edge gap, so every point of the strip
+    stays within r of a contact of the central row (edges included)."""
+    dens = params.contact_density
+    r = COVER_FACTOR * params.contact_spacing / dens
+    g = params.edge_spacing / dens
+    return 2.0 * math.sqrt(max(r * r - 0.25 * g * g, 0.0))
+
+
+def _narrow_centres(poly, xy: np.ndarray, dirs: np.ndarray, wmax: float, tol: float):
+    """Width of `poly` across `dirs` (unit XY, (N,2)) at points `xy` (N,2) lying on (or
+    within tol of) its boundary. Returns (narrow mask, centres (N,2), widths (N,)): a point
+    is narrow when the stretch of the cross line inside poly that contains it (within
+    tol) is at most wmax long and ends inside the probe line (both sides found)."""
+    n = len(xy)
+    narrow = np.zeros(n, bool)
+    centres = np.asarray(xy, float).copy()
+    widths = np.full(n, np.inf)
+    if n == 0 or poly is None or poly.is_empty:
+        return narrow, centres, widths
+    reach = wmax + tol
+    a = xy - dirs * reach
+    b = xy + dirs * reach
+    lines = shapely.linestrings(np.stack([a, b], axis=1))
+    inter = shapely.intersection(lines, poly)
+    L = 2.0 * reach
+    for k in range(n):
+        g = inter[k]
+        if g is None or g.is_empty:
+            continue
+        for part in shapely.get_parts(g):
+            if part.geom_type != "LineString" or part.length <= 1e-9:
+                continue
+            c = shapely.get_coordinates(part)
+            s = (c - a[k]) @ dirs[k]
+            s0, s1 = float(s.min()), float(s.max())
+            if s0 - tol <= reach <= s1 + tol:
+                if s0 > 1e-6 and s1 < L - 1e-6 and s1 - s0 <= wmax:
+                    narrow[k] = True
+                    widths[k] = s1 - s0
+                    centres[k] = a[k] + dirs[k] * (0.5 * (s0 + s1))
+                break
+    return narrow, centres, widths
+
+
+def _ring(center: np.ndarray, radius: float, n: int = 6) -> np.ndarray:
+    """n points (XY) on a circle around center, the first one on +X (regular hexagon for
+    n = 6: neighbours are `radius` apart, like a hex grid around its centre)."""
+    ang = np.arange(n) * (2 * math.pi / n)
+    return center[None, :2] + radius * np.column_stack([np.cos(ang), np.sin(ang)])
+
+
 class _Placer:
     def __init__(self, mesh, analysis, params, manual):
         self.mesh = mesh
@@ -457,7 +586,8 @@ class _Placer:
         dens = params.contact_density
         self.s = params.contact_spacing / dens
         self.e = params.edge_spacing / dens
-        self.dmin = params.min_contact_distance
+        self.dmin = effective_min_contact_distance(params)
+        self.dmin_anchor = params.min_contact_distance
         self.r_s = max(self.dmin, COVER_FACTOR * self.s)
         self.r_e = max(self.dmin, COVER_FACTOR * self.e)
         self.cov = _Coverage(max(self.r_s, self.r_e))
@@ -568,18 +698,22 @@ class _Placer:
         self.stats["skipped_covered"] += len(idx) - len(first)
         return idx[np.sort(first)]
 
-    def offer(self, pos, normal, reason: ContactReason, note: str, radius: float) -> bool:
+    def offer(self, pos, normal, reason: ContactReason, note: str, radius: float,
+              dmin: float | None = None) -> bool:
+        """Accept a candidate unless an accepted contact lies within max(radius, dmin)
+        (dmin: effective_min_contact_distance, except for island anchors)."""
         p = np.asarray(pos, float)
+        dmin = self.dmin if dmin is None else dmin
         if p[2] < self.h:
             # lies on the build plate (first layer): printed on the plate, no
             # support needed (e.g. the end of an edge that starts on the plate)
             self.stats["on_plate_skipped"] = self.stats.get("on_plate_skipped", 0) + 1
             return False
-        j = self.cov.nearest_within(p, max(radius, self.dmin))
+        j = self.cov.nearest_within(p, max(radius, dmin))
         if j >= 0:
             self.stats["skipped_covered"] += 1
             slot = self.slot_of[j]
-            if slot >= 0 and np.linalg.norm(self.cov.pts[j] - p) <= self.dmin:
+            if slot >= 0 and np.linalg.norm(self.cov.pts[j] - p) <= dmin:
                 c = self.out[slot]
                 tag = f"also {reason.value}"
                 if c.reason != reason and tag not in c.note:
@@ -631,6 +765,133 @@ class _Placer:
         return n
 
 
+def _anchor_islands(P: "_Placer", analysis: AnalysisResult, params: SupportParams, islands: list,
+                    seeds: np.ndarray, island_main: dict) -> None:
+    """Step 1b: contacts that anchor the first layers of islands starting in a point.
+
+    Real print (docs/PHYSICAL_TESTS.md, essai 2): a hand (sphere r 2.6 mm) whose layers
+    grew from 0.8 to 39 mm of extrusion per layer within 0.6 mm was held by one 0.26 mm
+    tip at its lowest point (the fill contacts around it were "covered" by that tip,
+    0.55 x contact_spacing = 1.3 mm, the first ones came 0.4 mm higher) and was dragged
+    off by the nozzle; in OrcaSlicer (classic walls) the top of a 0.26 mm tip is not even
+    extruded.
+
+    An island qualifies when its first layer is at most ANCHOR_START_RATIO of its
+    footprint island_anchor_height higher (island_anchor_footprint): a flat bottom does
+    not, and keeps the regular fill unchanged. It gets a ring of 6 contacts (regular
+    hexagon of side island_anchor_spacing, tried again at 0.75 x if fewer than 3 points
+    fit) around its lowest point, inside that footprint (half a line width in), outside
+    its first layer, on faces of the overhang mask (the flat part of the round bottom,
+    where layers grow faster than they can print unsupported), below the anchor height.
+    Ring contacts and the island's mandatory contact get island_tip_diameter tips.
+    At most 7 thick contacts per island: the marks stay bounded on large round bottoms,
+    whose higher parts keep the regular contacts."""
+    h = P.h
+    a = params.island_anchor_spacing
+    tip_d = max(params.island_tip_diameter, params.tip_diameter)
+    n_islands = n_contacts = 0
+    for k, r in enumerate(islands):
+        fp = island_anchor_footprint(analysis, r, params.island_anchor_height)
+        if fp is None:
+            continue
+        first, foot, z_top = fp
+        if foot.area <= 0 or first.area > ANCHOR_START_RATIO * foot.area:
+            continue
+        seed = np.asarray(seeds[k], float)
+        # half a line width inside the footprint: the contact stays on the bottom
+        # surface, not on the vertical wall where the footprint ends
+        inner = foot.buffer(-0.5 * params.line_width)
+        if inner.is_empty:
+            inner = foot
+        best = None
+        for rr in (a, 0.75 * a):
+            if rr < P.dmin_anchor - 1e-9:
+                continue
+            cand = _ring(seed, rr)
+            z, fid = P.caster.cast(np.column_stack([cand, np.full(len(cand), r.z - h)]))
+            ok = (shapely.contains_xy(inner, cand[:, 0], cand[:, 1])
+                  & ~shapely.contains_xy(first, cand[:, 0], cand[:, 1])
+                  & np.isfinite(z) & (z <= z_top + 0.5 * h) & (fid >= 0))
+            ok &= P.mask[np.maximum(fid, 0)]
+            if best is None or ok.sum() > best[3].sum():
+                best = (rr, cand, (z, fid), ok)
+            if ok.sum() >= 3:
+                break
+        if best is None or not best[3].any():
+            continue
+        rr, cand, (z, fid), ok = best
+        nrm = P.normal_of(np.where(ok, fid, -1))
+        placed = 0
+        for j in np.nonzero(ok)[0]:
+            p = np.array([cand[j, 0], cand[j, 1], z[j]])
+            note = (f"island anchor: ring {rr:.1f} mm around the lowest point of the island "
+                    f"starting at z={r.z:.2f} mm, {p[2] - r.z:.2f} mm above its first layer "
+                    f"(first layer {first.area:.2f} mm2, footprint {foot.area:.1f} mm2 "
+                    f"at +{z_top - r.z:.2f} mm), tip {tip_d:.2f} mm")
+            if P.offer(p, nrm[j], ContactReason.ISLAND, note,
+                       radius=max(P.dmin_anchor, ANCHOR_COVER * rr), dmin=P.dmin_anchor):
+                P.out[-1].tip_diameter = tip_d
+                placed += 1
+        if placed:
+            n_islands += 1
+            n_contacts += placed
+            c = island_main.get(k)
+            if c is not None:
+                c.tip_diameter = tip_d
+                c.note += f"; island anchored ({placed} anchor contacts, tip {tip_d:.2f} mm)"
+    P.stats["anchored_islands"] = n_islands
+    P.stats["anchor_contacts"] = n_contacts
+
+
+def _centre_narrow_edges(P: "_Placer", analysis: AnalysisResult, params: SupportParams,
+                         base: np.ndarray, perp: np.ndarray, pos: np.ndarray, fid: np.ndarray):
+    """Narrow parts (docs/ALGORITHM.md, section 2, step 4): an edge sample whose part,
+    measured across the edge on the model section just above it, is at most
+    narrow_width_limit() wide is moved to the middle of that width and projected on the
+    model there. The two hanging edges of a narrow part (blade, strap, fin) then give one
+    central row: the samples of the second edge fall between those of the first and are
+    covered by them (edge coverage radius) instead of making a second, parallel row of
+    tips 1-2 mm away. Modifies pos / fid in place; returns (narrow mask, widths)."""
+    n = len(base)
+    narrow = np.zeros(n, bool)
+    widths = np.full(n, np.inf)
+    lp = analysis.layer_polygons
+    lz = np.asarray(analysis.layer_z, dtype=float)
+    wlim = narrow_width_limit(params)
+    if n == 0 or lp is None or len(lz) == 0 or len(lp) != len(lz) or wlim <= 0:
+        return narrow, widths
+    h = P.h
+    tol = max(3 * h, 0.2)
+    step = max(2 * h, 0.1)
+    idx = np.clip(np.searchsorted(lz, base[:, 2] + 0.25 * h), 0, len(lz) - 1)
+    for i in np.unique(idx):
+        sel = np.nonzero(idx == i)[0]
+        m, c, w = _narrow_centres(lp[i], base[sel, :2], perp[sel], wlim, tol)
+        if not m.any():
+            continue
+        # the part must be narrow on both sides of the sample along the edge: the end of
+        # an edge where a blade meets a wider part (guard, pillar, hand) keeps its two
+        # edge contacts instead of being centred on one side only
+        tan = np.column_stack([perp[sel, 1], -perp[sel, 0]])
+        for sgn in (1.0, -1.0):
+            m2, _, _ = _narrow_centres(lp[i], base[sel, :2] + sgn * step * tan, perp[sel], wlim, tol)
+            m &= m2
+        if not m.any():
+            continue
+        k = sel[m]
+        z, f = P.caster.cast(np.column_stack([c[m], base[k, 2] - 2 * h]))
+        ok = (f >= 0) & np.isfinite(z)
+        ok &= np.abs(np.nan_to_num(z, nan=1e9) - base[k, 2]) <= np.maximum(0.5 * w[m], 2 * h)
+        ok &= P.mask[np.maximum(f, 0)]
+        k = k[ok]
+        pos[k] = np.column_stack([c[m][ok], z[ok]])
+        fid[k] = f[ok]
+        narrow[k] = True
+        widths[k] = w[m][ok]
+    P.stats["narrow_edge_samples"] = int(narrow.sum())
+    return narrow, widths
+
+
 # ---------------------------------------------------------------------------
 # main entry
 # ---------------------------------------------------------------------------
@@ -662,6 +923,7 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
         pos, fid = P.project(xy, zs - h, zs + ISLAND_Z_SEARCH)
         nrm = P.normal_of(fid)
         lp_used = np.zeros(len(lp), dtype=bool)
+        island_main: dict[int, Contact] = {}
         for k, r in enumerate(islands):
             note = f"island starting at z={r.z:.2f} mm (area {r.area:.2f} mm2), nothing below it"
             # the true first point of an island is its lowest vertex when it has one
@@ -675,7 +937,16 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
                         nrm[k] = lp_n[j]
                     lp_used[j] = True
                     note += "; at its lowest point (low_point)"
-            P.offer(pos[k], nrm[k], ContactReason.ISLAND, note, radius=P.dmin)
+            # mandatory: only min_contact_distance (not the effective spacing) may drop
+            # it, so two islands starting side by side both keep their contact
+            if P.offer(pos[k], nrm[k], ContactReason.ISLAND, note, radius=P.dmin_anchor,
+                       dmin=P.dmin_anchor):
+                island_main[k] = P.out[-1]
+
+    # ---- 1b. anchor the islands that start in a point ------------------------
+    if islands and params.island_anchor_height > 0:
+        progress.update(0.1, "Island anchors")
+        _anchor_islands(P, analysis, params, islands, pos, island_main)
 
     # ---- 2. low points ------------------------------------------------------
     progress.update(0.15, "Low points")
@@ -759,13 +1030,17 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
         perp /= np.maximum(np.linalg.norm(perp, axis=1, keepdims=True), 1e-12)
         P.stats["edge_polylines"] = len(base_l)
         pos, fid = inset_project(base, perp)
+        narrow, widths = _centre_narrow_edges(P, analysis, params, base, perp, pos, fid)
         pos, fid = P.avoid_details(pos, fid, min(0.25 * P.e, 0.6))
         nrm = P.normal_of(fid)
         for k in range(len(pos)):
             if k % 2000 == 0:
                 progress.update(0.3 + 0.2 * k / len(pos), "Edge contacts")
-            P.offer(pos[k], nrm[k], ContactReason.EDGE,
-                    f"along a hanging edge at z={base[k, 2]:.2f} mm", radius=rad[k])
+            note = f"along a hanging edge at z={base[k, 2]:.2f} mm"
+            if narrow[k]:
+                note += (f"; centre line of a part {widths[k]:.2f} mm wide (one row instead of "
+                         "one per edge)")
+            P.offer(pos[k], nrm[k], ContactReason.EDGE, note, radius=rad[k])
 
     # ---- 5. fill islands and overhang regions ------------------------------
     progress.update(0.5, "Filling overhang areas")

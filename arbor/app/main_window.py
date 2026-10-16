@@ -84,7 +84,7 @@ def _task_export(progress, kind: str, path: str, model, supports, raft, params, 
         # Orca / Bambu Studio keep them apart (own layer height per object) without moving
         # them (see docs/SLICERS.md)
         ex.export_3mf(path, model, supports, raft, params, model_name=name,
-                      layout="separate" if kind == "3mf_separate" else "objects")
+                      layout="separate" if (kind == "3mf_separate" or (raft is not None and len(raft.faces))) else "objects")
         progress.update(0.8, "Validating file")
         return ex.validate_export(path)
     parts = [m for m in ((model,) if kind == "stl_all" else ()) + (supports, raft)

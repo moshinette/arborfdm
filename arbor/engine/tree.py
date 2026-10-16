@@ -468,6 +468,7 @@ class _Router:
             n = n / ln if ln > 1e-12 else np.array([0.0, 0.0, -1.0])
             tip_d = c.tip_diameter if c.tip_diameter else P.tip_diameter
             tip_r = tip_d / 2
+            rb = self.tip_base_r(tip_r)
             u = self._tip_dir(pos, n)
             base = pos + u * P.tip_length
             if P.tip_shape == "ball":
@@ -492,16 +493,25 @@ class _Router:
                 t = (pos[2] - zb) / max(-u[2], 1e-6)
                 fpos = pos + u * t
                 fpos[2] = zb
-                f = tree.add(fpos, max(self.r_tipbase, tip_r), NodeKind.FOOT)
+                f = tree.add(fpos, max(rb, tip_r), NodeKind.FOOT)
                 tip.parent = f.id
                 tree.foot_radius[f.id] = self._foot_r(fpos, f.radius)
                 continue
-            b = tree.add(base, self.r_tipbase, NodeKind.BRANCH, contact_id=c.id)
+            b = tree.add(base, rb, NodeKind.BRANCH, contact_id=c.id)
             tip.parent = b.id
             kb = self._base_level(base[2])
             move = (base[2] - (zb + kb * dz)) * self.tan
-            self.pending.append((kb, b.id, move, max(self.r_min, self.r_tipbase)))
+            self.pending.append((kb, b.id, move, max(self.r_min, rb)))
         self.pending.sort(key=lambda t: -t[0])
+
+    def tip_base_r(self, tip_r: float) -> float:
+        """Radius where a tip meets its branch. A tip thicker than tip_diameter (per
+        contact override, island anchors) keeps the profile's taper: its base is widened
+        by the same amount, tip_base_diameter - tip_diameter (0.26 -> 0.7 becomes
+        0.45 -> 0.89 in 0.2 mm profiles), so the thicker tip is also stiffer below
+        the contact instead of becoming a near cylinder."""
+        P = self.P
+        return max(self.r_tipbase, tip_r + 0.5 * max(P.tip_base_diameter - P.tip_diameter, 0.0))
 
     # -- short supports (contact just above a surface) ----------------------------
     def min_short_gap(self) -> float:
@@ -601,7 +611,7 @@ class _Router:
         tip_pos = pos - n * P.tip_penetration - np.array([0.0, 0.0, P.z_gap])
         tip = tree.add(tip_pos, tip_r, NodeKind.TIP, contact_id=c.id)
         frac = min(1.0, max(gap, 0.0) / max(P.tip_length, 1e-6))
-        r_low = tip_r + (self.r_tipbase - tip_r) * frac
+        r_low = tip_r + (self.tip_base_r(tip_r) - tip_r) * frac
         if on_plate:
             f = tree.add([tip_pos[0], tip_pos[1], self.zb], max(r_low, tip_r), NodeKind.FOOT)
             tree.foot_radius[f.id] = self._foot_r(f.position, f.radius)

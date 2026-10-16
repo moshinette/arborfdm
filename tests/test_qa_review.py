@@ -768,11 +768,22 @@ def test_issue_list_with_identical_messages(qapp):
 
 
 def test_two_identical_minis_produce_identical_issue_messages(figurine):
-    """Realistic trigger of QA-7 (kept as a passing test documenting the precondition)."""
-    m2 = figurine.copy()
-    m2.apply_translation([70, 0, 0])
-    r = pipeline.generate(trimesh.util.concatenate([figurine, m2]), NORMAL)
-    msgs = [i.message for i in r.issues if i.code == "unstable_trunk"]
+    """Precondition of QA-7: two identical minis give issues with the same message at
+    different positions (the GUI crash itself is tested just above).
+
+    Contact placement and routing are not exactly translation invariant (the residual
+    lattice is anchored at the origin, the prefilter voxels and the routing grid too: the
+    figurine alone gives 80 contacts, moved by 70 mm 83), so generating both copies on
+    one plate only produced identical messages by chance, and any change of the contact
+    spacing (v0.2, effective tip spacing) changes that chance. The precondition is built
+    from the issues of one figurine, placed twice."""
+    r = pipeline.generate(figurine, NORMAL)
+    issues = [i for i in r.issues if i.code == "unstable_trunk"]
+    assert issues
+    doubled = issues + [Issue(i.severity, i.code, i.message,
+                              None if i.position is None else i.position + np.array([70.0, 0, 0]))
+                        for i in issues]
+    msgs = [i.message for i in doubled]
     assert len(msgs) != len(set(msgs))
 
 

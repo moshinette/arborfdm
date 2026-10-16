@@ -349,3 +349,17 @@ def test_orca_find_set_clear(orca_env, capsys):
     assert f"OrcaSlicer: {exe}" in capsys.readouterr().out
     assert main(["orca", "--clear-path"]) == EXIT_OK
     assert main(["orca", "--find"]) == EXIT_PROBLEMS
+
+
+def test_default_layout_is_separate_with_raft(tmp_path):
+    """With a raft, the default 3MF keeps model and supports aligned in slicers that drop
+    each object to the bed (2nd print test: supports lowered by the raft thickness)."""
+    import zipfile
+    from arbor.cli import main
+    out = tmp_path / "raft.3mf"
+    rc = main(["generate", str(ROOT / "examples" / "shelf.stl"), "-o", str(out), "-q",
+               "--set", "raft_enabled=true"])
+    assert rc in (0, 1)
+    with zipfile.ZipFile(out) as z:
+        xml = z.read("3D/3dmodel.model").decode()
+    assert xml.count("<item ") == 2          # model + (supports + raft), both on the plate
