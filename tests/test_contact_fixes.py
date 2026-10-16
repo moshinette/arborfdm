@@ -227,4 +227,6 @@ def test_min_spacing_contacts_peak_memory():
                          timeout=300, env={**__import__("os").environ, "PYTHONPATH": str(root)})
     assert out.returncode == 0, out.stderr[-500:]
     rss = float(out.stdout.split("RSS_MB")[1])
-    assert rss < 1500, f"peak RSS {rss:.0f} MB"
+    # ~470 MB locally (2 cores), ~1.5 GB on GitHub ubuntu-latest Python 3.12 (more
+    # threads); the regression this guards against went over 4 GB
+    assert rss < 2500, f"peak RSS {rss:.0f} MB"
