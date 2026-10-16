@@ -6,7 +6,7 @@ Ceci n'est pas un avis juridique.
 
 ## 1. Code d'ArborFDM
 
-`LICENSE` : MIT (recommandation, choix final au mainteneur, voir § 5). `pyproject.toml` déclare `license = "MIT"` (SPDX, PEP 639).
+`LICENSE` : GNU GPL v3.0 ou ultérieure, choix du mainteneur (2026-10-16, voir § 5). `pyproject.toml` déclare `license = "GPL-3.0-or-later"` (SPDX, PEP 639). Toutes les dépendances sont compatibles (aucune n'est sous une licence incompatible avec la GPLv3 ; PySide6/Qt est utilisé sous LGPLv3, lié dynamiquement).
 
 ## 2. Embarqué dans l'exécutable Windows (PyInstaller onedir)
 
@@ -38,11 +38,11 @@ pyqtgraph 0.14 dépend de **colorama** (BSD-3-Clause), embarqué lui aussi et li
 | Avis que la bibliothèque est utilisée et sous quelle licence (§ 4a) | `THIRD_PARTY_NOTICES.md` (dépôt) et `THIRD_PARTY_NOTICES.txt` (zip) |
 | Copie du texte LGPL et GPL (§ 4b) | textes complets dans `THIRD_PARTY_NOTICES.txt` (copiés depuis `packaging/licenses/`) |
 | Code source de la bibliothèque (§ 4d, renvoyant à GPLv3 § 6) | liens vers les sources exactes (download.qt.io, code.qt.io, libgeos.org) + offre de fournir une copie sur demande pendant 3 ans (dans `THIRD_PARTY_NOTICES.md`). Option la plus sûre : joindre ou héberger les archives sources de la version exacte de Qt/PySide6 à côté de la release (volumineux). |
-| Pas de restriction à la modification / rétro-ingénierie pour le débogage (§ 4) | la licence MIT n'en impose aucune |
+| Pas de restriction à la modification / rétro-ingénierie pour le débogage (§ 4) | la GPLv3 n'en impose aucune |
 | « Installation Information » (GPLv3 § 6, produits grand public) | non applicable : logiciel, pas un appareil |
 | Ne pas modifier Qt sans publier les modifications | Qt n'est pas modifié |
 
-Choisir GPL (2 ou 3) pour PySide6 au lieu de LGPL n'apporterait rien : l'option LGPLv3 suffit et laisse ArborFDM sous MIT.
+PySide6 reste utilisé sous LGPLv3 (son option GPL-3.0 serait aussi compatible avec ArborFDM sous GPLv3).
 
 ## 4. Développement et tests seulement (non embarqués)
 
@@ -55,6 +55,8 @@ Choisir GPL (2 ou 3) pour PySide6 au lieu de LGPL n'apporterait rien : l'option 
 | setuptools | MIT | backend de build (`>=78.1.1`) |
 
 ## 5. Choix de la licence d'ArborFDM
+
+**Choix retenu (2026-10-16) : GPL-3.0-or-later.** Le tableau ci-dessous garde l'analyse des options faite avant ce choix.
 
 Toutes les dépendances sont compatibles avec MIT, Apache-2.0, LGPL et GPL-3.0 (aucune n'est GPL sans exception ; PySide6 en LGPLv3 dynamique fonctionne avec une licence permissive comme avec une licence copyleft).
 

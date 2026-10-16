@@ -8,7 +8,7 @@ name = "arborfdm"
 dynamic = ["version"]                       # single source: arbor/__init__.py
 description = "Hybrid tree support generator for FDM miniatures"
 readme = "README.md"
-license = "MIT"
+license = "GPL-3.0-or-later"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 # 3.10.0 crashes PyInstaller (bug in its "dis" module); manifold3d has no wheel for 3.15+
 # (a source build needs TBB). Remove the upper bound once manifold3d publishes 3.15 wheels.

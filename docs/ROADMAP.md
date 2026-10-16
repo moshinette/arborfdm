@@ -62,7 +62,7 @@ Les deux options de supports ne s'additionnent pas (les parois autour du vide co
 |---|---|---|---|---|
 | Portage du routage en code natif (Rust/C++) | moyenne (gros modèles) | 2-4 semaines | élevé | Les mesures actuelles (13,5 s pour ~1 M de triangles) ne l'imposent pas encore |
 | Découpe de la figurine en morceaux avec tenons (demande Reddit) | haute | plusieurs semaines | élevé | Quasiment un second outil |
-| Plugin intégré à OrcaSlicer | haute | élevé, dépend du projet Orca (AGPL, C++) | élevé | Possible grâce à la licence MIT, mais demande une contribution amont |
+| Plugin intégré à OrcaSlicer | haute | élevé, dépend du projet Orca (AGPL, C++) | élevé | Licence GPLv3 compatible avec l'AGPL d'OrcaSlicer ; demande une contribution amont |
 | Versions macOS / Linux empaquetées | moyenne | 2-3 jours chacune | moyen | Le code tourne déjà sous Linux depuis les sources ; il manque le packaging et des tests réels |
 
 ## Ce qui n'est volontairement pas prévu

@@ -4,6 +4,8 @@ All notable changes to ArborFDM. Format based on [Keep a Changelog](https://keep
 
 ## [0.3.0] - unreleased
 
+- License changed from MIT to GPL-3.0-or-later (maintainer decision before the first publication).
+
 - Model resting on the raft (default): the 3MF for OrcaSlicer / Bambu Studio is one object with separate parts (model, supports, raft) instead of one merged mesh; alignment kept, per-part settings (lighter supports) applied to the supports and raft parts only (checked with OrcaSlicer 2.4.2 CLI: 9.96 g to 8.73 g). Layer height stays per object.
 
 - Tall support trees in an unstable group (narrower than height / 5, e.g. the arm-end trees of the figurine that were knocked over in print test 4) are braced to the nearest neighbouring trunks on several levels (printable angle, up to 1.5 x brace_max_length); groups that cannot be braced are reported as `isolated_tall_tree`.
