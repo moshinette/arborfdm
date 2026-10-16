@@ -7,7 +7,7 @@
 ![Supports generated on a synthetic test figurine](docs/screenshots/ui_after_1920_04_supports_generated.png)
 
 > [!WARNING]
-> **Early version (0.2.0), not validated by systematic print tests.** The engine, GUI, CLI and exports work and are covered by automated tests (`docs/TEST_REPORT.md`), and the first real prints led to profile changes, but tip sizes, densities and feet are still reasoned starting points. Only OrcaSlicer has been tried so far. Read [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) before printing anything you care about, and please share your results.
+> **Early version (0.3.0), not validated by systematic print tests.** The engine, GUI, CLI and exports work and are covered by automated tests (`docs/TEST_REPORT.md`), and the first real prints led to profile changes, but tip sizes, densities and feet are still reasoned starting points. Only OrcaSlicer has been tried so far. Read [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) before printing anything you care about, and please share your results.
 
 ArborFDM is an independent, original implementation. Its feature set was inspired by publicly described features of commercial support tools for miniatures; it does not use, contain or derive from their code, assets or data, and it is not affiliated with or endorsed by any of them.
 
@@ -118,7 +118,7 @@ Questions and bugs: GitHub issues. Security problems: see [`SECURITY.md`](SECURI
 **ArborFDM génère des supports arborescents « hybrides » pour imprimer des figurines en FDM** : des troncs et branches robustes qui ne touchent le modèle que par une pointe fine, exportés avec le modèle dans un 3MF (ou un STL) prêt pour le slicer.
 
 > [!WARNING]
-> **Version précoce (0.2.0), non validée par des essais d'impression systématiques.** Les profils (pointes, densités, pieds) sont des points de départ raisonnés ; seul OrcaSlicer a été essayé. Lisez [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) et partagez vos résultats.
+> **Version précoce (0.3.0), non validée par des essais d'impression systématiques.** Les profils (pointes, densités, pieds) sont des points de départ raisonnés ; seul OrcaSlicer a été essayé. Lisez [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) et partagez vos résultats.
 
 - **Windows** : téléchargez `ArborFDM-<version>-windows-x64.zip` dans les *Releases* du dépôt, vérifiez le SHA-256 (`certutil -hashfile <zip> SHA256`), dézippez, lancez `ArborFDM.exe`. L'exécutable n'est pas signé : SmartScreen affiche un avertissement (*Informations complémentaires*, puis *Exécuter quand même*) et certains antivirus peuvent signaler un faux positif (voir `docs/PACKAGING.md`).
 - **Depuis les sources** : Python 3.12 à 3.14 en 64 bits (3.12 conseillé), puis `python -m pip install -e ".[gui]"` dans un venv ; lancement avec `python -m arbor.app.main` (interface) ou `python -m arbor --help` (CLI).

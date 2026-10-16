@@ -2,7 +2,7 @@
 
 All notable changes to ArborFDM. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) (0.x: anything may still change).
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-10-16
 
 ### CI and platform support
 - Python 3.12 minimum: on 3.10 and 3.11, PySide6 6.12 aborts with "deallocating None" during background tasks (reproduced locally). CI now runs 3.12, 3.13, 3.14 on Linux and 3.12 on Windows.
