@@ -44,6 +44,109 @@ PRINTABLE_MARGIN_DEG = 2.0
 # hull and tube leave zero-volume slivers in the boolean union).
 JOINT_INSET = 0.05
 
+# Braced groups (Essai 4, A1 mini 0.2: three 42 mm trees braced only to one another, in a
+# line, were knocked over in one piece). A group of plate trees joined by braces (or a lone
+# tree) is stable when its base, in its narrowest direction, is at least
+# 1/BRACE_GROUP_MAX_ASPECT of its tallest tree: a lateral push F at height H pulls the feet
+# with about F*H/w, <= 4F, against 6.6F for the group that fell. Two feet, or feet in a
+# line, are only one foot wide across: this subsumes a minimum number of feet.
+BRACE_GROUP_MAX_ASPECT = 5.0
+# braces that link an isolated group may reach this many brace_max_length (horizontal run):
+# the gap between the arms of a figurine and its body is ~1.3x brace_max_length
+BRIDGE_LENGTH_FACTOR = 1.5
+# such a long brace is thickened (from brace_diameter) to keep length / diameter below this
+# (verify flags fragile_support beyond 20)
+BRIDGE_SLENDER_MAX = 18.0
+# levels tried for such a link until one fits (then one every brace_spacing_z)
+BRIDGE_STEP_Z = 2.0
+
+
+def foot_group_width(xy: np.ndarray, radii: np.ndarray) -> float:
+    """Smallest width (mm) of a group of feet: extent of their centres in the narrowest
+    direction plus a mean foot diameter."""
+    xy = np.asarray(xy, float).reshape(-1, 2)
+    r = float(np.mean(radii)) if len(radii) else 0.0
+    if len(xy) < 2:
+        return 2.0 * r
+    a = np.radians(np.arange(0.0, 180.0, 3.0))
+    proj = xy @ np.stack([np.cos(a), np.sin(a)])
+    return float((proj.max(axis=0) - proj.min(axis=0)).min()) + 2.0 * r
+
+
+def braced_group_stable(width: float, height: float) -> bool:
+    return width * BRACE_GROUP_MAX_ASPECT >= height
+
+
+def braced_groups(tree: SupportTree, params: SupportParams) -> list[dict]:
+    """Groups of plate trees joined by braces (from the tree and its braces only).
+    Each group: feet (root ids), height (tallest tree above z_base, mm), width
+    (foot_group_width), tall (feet whose tree is above brace_min_height), stable."""
+    nodes = tree.nodes
+    if not nodes:
+        return []
+    zb = float(getattr(tree, "z_base", 0.0))
+    root_of: dict[int, int] = {}
+    for nid in nodes:
+        path, i = [], nid
+        while i not in root_of and nodes[i].parent is not None:
+            path.append(i)
+            i = nodes[i].parent
+        r = root_of.get(i, i)
+        for q in path + [i]:
+            root_of[q] = r
+    top: dict[int, float] = {}
+    for nid, n in nodes.items():
+        r = root_of[nid]
+        top[r] = max(top.get(r, -1e9), float(n.position[2]))
+    feet = [r for r in top if nodes[r].kind == NodeKind.FOOT]
+    if not feet:
+        return []
+    par = {r: r for r in feet}
+
+    def find(a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+
+    braces = getattr(tree, "braces", []) or []
+    if braces:
+        ed = [(c, p) for c, p in tree.edges()]
+        A = np.array([nodes[c].position for c, _ in ed]).reshape(-1, 3)
+        B = np.array([nodes[p].position for _, p in ed]).reshape(-1, 3)
+        R = np.array([max(nodes[c].radius, nodes[p].radius) for c, p in ed])
+        AB = B - A
+        L2 = np.maximum(np.einsum("ij,ij->i", AB, AB), 1e-12)
+
+        def owner(q, rb):
+            if not len(ed):
+                return None
+            t = np.clip(np.einsum("ij,ij->i", q - A, AB) / L2, 0.0, 1.0)
+            d = np.linalg.norm(A + t[:, None] * AB - q, axis=1) - R
+            k = int(np.argmin(d))
+            return root_of[ed[k][0]] if d[k] <= rb + 0.5 else None
+
+        for p0, p1, rb in braces:
+            a = owner(np.asarray(p0, float), float(rb))
+            b = owner(np.asarray(p1, float), float(rb))
+            if a in par and b in par:
+                par[find(a)] = find(b)
+    comps: dict[int, list[int]] = {}
+    for r in feet:
+        comps.setdefault(find(r), []).append(r)
+    foot_r = getattr(tree, "foot_radius", {}) or {}
+    out = []
+    for mem in comps.values():
+        h = max(top[r] for r in mem) - zb
+        xy = np.array([nodes[r].position[:2] for r in mem])
+        rad = np.array([float(foot_r.get(r, params.foot_diameter / 2)) for r in mem])
+        w = foot_group_width(xy, rad)
+        tall = [r for r in mem if top[r] - zb > params.brace_min_height]
+        out.append(dict(feet=mem, height=h, width=w, tall=tall,
+                        tall_heights=[top[r] - zb for r in tall],
+                        stable=braced_group_stable(w, h)))
+    return out
+
 
 def printable_angle_deg(params: SupportParams) -> float:
     """Largest tilt from vertical (deg) any support surface may have: the overhang angle
@@ -1126,65 +1229,208 @@ class _Router:
                 continue
             if np.any(np.diff(pts[:, 2]) <= 0):
                 continue
-            trunks.append((pts, rad))
-        if len(trunks) < 2:
-            return
-        fxy = np.array([t[0][0, :2] for t in trunks])
-        kd = cKDTree(fxy)
-        pairs = set()
-        for a in range(len(trunks)):
-            d, ii = kd.query(fxy[a], k=min(3, len(trunks)))
-            for dist, b in zip(np.atleast_1d(d)[1:], np.atleast_1d(ii)[1:]):
-                if dist <= P.brace_max_length * 1.5:
-                    pairs.add((min(a, int(b)), max(a, int(b))))
+            trunks.append((pts, rad, f.id))
+        links: list[tuple[int, int]] = []
+        if len(trunks) >= 2:
+            fxy = np.array([t[0][0, :2] for t in trunks])
+            kd = cKDTree(fxy)
+            pairs = set()
+            for a in range(len(trunks)):
+                d, ii = kd.query(fxy[a], k=min(3, len(trunks)))
+                for dist, b in zip(np.atleast_1d(d)[1:], np.atleast_1d(ii)[1:]):
+                    if dist <= P.brace_max_length * 1.5:
+                        pairs.add((min(a, int(b)), max(a, int(b))))
+            for a, b in sorted(pairs):
+                if self._brace_pair(trunks[a][:2], trunks[b][:2], P.brace_max_length):
+                    links.append((trunks[a][2], trunks[b][2]))
+        self._bridge_isolated(ch, links)
+
+    @staticmethod
+    def _trunk_at(tr, z):
+        pts, rad = tr
+        x = np.interp(z, pts[:, 2], pts[:, 0])
+        y = np.interp(z, pts[:, 2], pts[:, 1])
+        return np.array([x, y, z]), float(np.interp(z, pts[:, 2], rad))
+
+    def _brace_pair(self, ta, tb, max_run: float, bridge: bool = False) -> int:
+        """Diagonal braces between two trunks (pts, radii), one every brace_spacing_z,
+        alternating direction; returns how many were added. bridge: a link for an isolated
+        group (longer, thickened to BRIDGE_SLENDER_MAX, full model clearance, and it may
+        climb from a short neighbour onto a taller trunk)."""
+        P, zb = self.P, self.zb
+        ztop = min(ta[0][-1, 2], tb[0][-1, 2]) - 0.5
+        zend = max(ta[0][-1, 2], tb[0][-1, 2]) - 0.5 if bridge else ztop
+        added = 0
+        # a bridge may start just above the foot collars (short neighbours of ~20 mm leave
+        # no room for a 40 deg diagonal starting at brace_spacing_z)
+        z_first = zb + (P.foot_height + P.collar_height + 1.0 if bridge else P.brace_spacing_z)
+        # bridge: levels tried every BRIDGE_STEP_Z until one fits, then brace_spacing_z
+        step = BRIDGE_STEP_Z if bridge else P.brace_spacing_z
+        z_next = z_first
+        flip = False
+        while True:
+            z0 = z_next
+            if z0 >= zend:
+                break
+            z_next = z0 + step
+            order = [(ta, tb), (tb, ta)] if not flip else [(tb, ta), (ta, tb)]
+            for lo_t, hi_t in (order if bridge else order[:1]):
+                # bridge: each end only has to stay below the top of its own trunk
+                zt = (hi_t[0][-1, 2] - 0.5) if bridge else ztop
+                if bridge and z0 >= lo_t[0][-1, 2] - 0.5:
+                    continue
+                b = self._one_brace(lo_t, hi_t, z0, zt, max_run, bridge)
+                if b is not None:
+                    self.tree.braces.append(b)
+                    added += 1
+                    flip = not flip
+                    z_next = z0 + P.brace_spacing_z
+                    break
+        return added
+
+    def _one_brace(self, lo_t, hi_t, z0, ztop, max_run, bridge):
+        P, zb = self.P, self.zb
         rb = P.brace_diameter / 2
         tana = math.tan(math.radians(max(self.angle, 1.0)))
+        at = self._trunk_at
+        p0, r0 = at(lo_t, z0)
+        q0, _ = at(hi_t, z0)
+        d = float(np.linalg.norm(p0[:2] - q0[:2]))
+        if d > max_run or d < r0 + 1.0:
+            return None
+        rise = d / tana
+        z1 = z0 + rise
+        if z1 >= ztop:
+            return None
+        p1, r1 = at(hi_t, z1)
+        run = float(np.linalg.norm(p1[:2] - p0[:2]))
+        if run > max_run:
+            return None
+        if run > (z1 - z0) * self.tan_print:
+            # the upper trunk moved away between z0 and z1: this brace would lean
+            # beyond the printable angle (it prints without support of its own)
+            return None
+        if not bridge:
+            rr = rb
+            s = np.linspace(0.15, 0.85, 8)
+            clear = rb + 0.5 * P.xy_clearance
+        else:
+            L = float(np.linalg.norm(p1 - p0))
+            rr = max(rb, L / (2.0 * BRIDGE_SLENDER_MAX))
+            if rr > 0.85 * min(r0, r1):
+                return None          # thicker than the trunks it joins
+            n = max(8, int(math.ceil(L / max(0.5 * self.grid.res, 0.25))))
+            s = np.linspace(0.0, 1.0, n)
+            hx = run * s
+            s = s[(hx > r0) & (hx < run - r1)]   # outside both trunks (already clear)
+            clear = rr + P.xy_clearance           # like the branches
+        pts = p0[None, :] + s[:, None] * (p1 - p0)[None, :]
+        for pt in pts:
+            k = int((pt[2] - zb) // self.dz)
+            if self.mdist(k, pt[:2])[0] < clear:
+                return None
+        return (p0, p1, rr)
 
-        def at(tr, z):
-            pts, rad = tr
-            x = np.interp(z, pts[:, 2], pts[:, 0])
-            y = np.interp(z, pts[:, 2], pts[:, 1])
-            return np.array([x, y, z]), float(np.interp(z, pts[:, 2], rad))
-
-        for a, b in sorted(pairs):
-            ta, tb = trunks[a], trunks[b]
-            ztop = min(ta[0][-1, 2], tb[0][-1, 2]) - 0.5
-            i = 1
-            flip = False
+    def _bridge_isolated(self, ch, links) -> None:
+        """Link every braced group holding a tree taller than brace_min_height that is not
+        stable (braced_group_stable) to its nearest neighbouring trunk, until it is stable
+        or no link can be built (verify then reports isolated_tall_tree). Nothing changes
+        when no tall tree is in such a group."""
+        P, tree, zb = self.P, self.tree, self.zb
+        nodes = tree.nodes
+        feet = [f.id for f in tree.roots() if f.kind == NodeKind.FOOT]
+        if len(feet) < 2:
+            return
+        top: dict[int, float] = {}
+        for f in feet:                           # subtree tops, post-order
+            order, st = [], [f]
+            while st:
+                i = st.pop()
+                order.append(i)
+                st.extend(ch[i])
+            for i in reversed(order):
+                top[i] = max([float(nodes[i].position[2])] + [top[c] for c in ch[i]])
+        H = {f: top[f] - zb for f in feet}
+        if not any(h > P.brace_min_height for h in H.values()):
+            return
+        spine = {}
+        for f in feet:                           # main trunk: tallest trunk child each time
+            path, cur = [f], f
             while True:
-                z0 = zb + P.brace_spacing_z * i
-                if z0 >= ztop:
+                kids = [c for c in ch[cur] if nodes[c].kind == NodeKind.TRUNK
+                        and nodes[c].position[2] > nodes[cur].position[2]]
+                if not kids:
                     break
-                i += 1
-                lo_t, hi_t = (ta, tb) if not flip else (tb, ta)
-                p0, r0 = at(lo_t, z0)
-                q0, _ = at(hi_t, z0)
-                d = float(np.linalg.norm(p0[:2] - q0[:2]))
-                if d > P.brace_max_length or d < r0 + 1.0:
+                cur = max(kids, key=lambda c: top[c])
+                path.append(cur)
+            if len(path) >= 2 and nodes[path[-1]].position[2] - zb > P.foot_height + P.collar_height + 1.5:
+                spine[f] = (np.array([nodes[i].position for i in path]),
+                            np.array([nodes[i].radius for i in path]))
+        foot_r = tree.foot_radius
+        par = {f: f for f in feet}
+
+        def find(a):
+            while par[a] != a:
+                par[a] = par[par[a]]
+                a = par[a]
+            return a
+
+        for a, b in links:
+            if a in par and b in par:
+                par[find(a)] = find(b)
+
+        def groups():
+            g: dict[int, list[int]] = {}
+            for f in feet:
+                g.setdefault(find(f), []).append(f)
+            return list(g.values())
+
+        def stable(mem):
+            xy = np.array([nodes[f].position[:2] for f in mem])
+            rad = np.array([float(foot_r.get(f, P.foot_diameter / 2)) for f in mem])
+            return braced_group_stable(foot_group_width(xy, rad), max(H[f] for f in mem))
+
+        def gap(a, b):
+            ta, tb = spine[a], spine[b]
+            z0 = zb + P.foot_height + P.collar_height + 1.0
+            z1 = max(ta[0][-1, 2], tb[0][-1, 2])
+            if z1 <= z0:
+                return BIG
+            zs = np.arange(z0, z1, 1.0)
+            pa = np.stack([np.interp(zs, ta[0][:, 2], ta[0][:, k]) for k in (0, 1)], axis=1)
+            pb = np.stack([np.interp(zs, tb[0][:, 2], tb[0][:, k]) for k in (0, 1)], axis=1)
+            return float(np.linalg.norm(pa - pb, axis=1).min())
+
+        max_run = BRIDGE_LENGTH_FACTOR * P.brace_max_length
+        given_up: set[frozenset] = set()
+        for _ in range(4 * len(feet)):
+            todo = [m for m in groups()
+                    if any(H[f] > P.brace_min_height for f in m) and not stable(m)
+                    and frozenset(m) not in given_up]
+            if not todo:
+                break
+            todo.sort(key=lambda m: -max(H[f] for f in m))
+            m = todo[0]
+            ms = set(m)
+            cand = []
+            for a in m:
+                if a not in spine:
                     continue
-                rise = d / tana
-                z1 = z0 + rise
-                if z1 >= ztop:
-                    continue
-                p1, _ = at(hi_t, z1)
-                run = float(np.linalg.norm(p1[:2] - p0[:2]))
-                if run > P.brace_max_length:
-                    continue
-                if run > (z1 - z0) * self.tan_print:
-                    # the upper trunk moved away between z0 and z1: this brace would lean
-                    # beyond the printable angle (it prints without support of its own)
-                    continue
-                s = np.linspace(0.15, 0.85, 8)
-                pts = p0[None, :] + s[:, None] * (p1 - p0)[None, :]
-                okb = True
-                for pt in pts:
-                    k = int((pt[2] - zb) // self.dz)
-                    if self.mdist(k, pt[:2])[0] < rb + 0.5 * P.xy_clearance:
-                        okb = False
-                        break
-                if okb:
-                    tree.braces.append((p0, p1, rb))
-                    flip = not flip
+                for b in spine:
+                    if b in ms:
+                        continue
+                    g = gap(a, b)
+                    if g <= max_run:
+                        cand.append((g, a, b))
+            cand.sort()
+            linked = False
+            for _, a, b in cand[:12]:
+                if self._brace_pair(spine[a], spine[b], max_run, bridge=True):
+                    par[find(a)] = find(b)
+                    linked = True
+                    break
+            if not linked:
+                given_up.add(frozenset(m))
 
     # -- stability ---------------------------------------------------------------
     # Height of a tree / radius of its foot above which the foot is enlarged (verify flags

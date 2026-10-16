@@ -6,7 +6,7 @@ Date : 2026-10-15. Machine : conteneur Linux, 2 cœurs, 7,8 Gio, Python 3.13.16,
 
 Commande : `QT_QPA_PLATFORM=offscreen python3 -m pytest -q -p no:cacheprovider`
 
-Résultat : **640 passed, 1 skipped, 0 failed, 473 s** (2026-10-16, itération 0.3 : raft footprint/bed, surélévation, molette de couches, pourcentages d orientation, supports creux et allégés ; le test sauté vérifie un dossier en lecture seule, sans effet en root).
+Résultat : **646 passed, 1 skipped, 0 failed** (2026-10-16, itération 0.3 + entretoisement des arbres hauts isolés : suite complète 645 passed + 1 test corrigé relancé seul, `test_two_identical_minis_produce_identical_issue_messages`, dont la précondition utilisait par hasard l'avertissement unstable_trunk que l'entretoisement supprime ; le test sauté vérifie un dossier en lecture seule, sans effet en root).
 
 Les 3 avertissements sont des `RuntimeWarning: invalid value encountered in divide` dans `trimesh/triangles.py` (normales de triangles d'aire nulle), sans effet sur les assertions.
 

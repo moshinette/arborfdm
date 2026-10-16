@@ -791,10 +791,10 @@ def test_two_identical_minis_produce_identical_issue_messages(figurine):
     one plate only produced identical messages by chance, and any change of the contact
     spacing (v0.2, effective tip spacing) changes that chance. The precondition is built
     from the issues of one figurine, placed twice."""
-    # without a raft (on by default since v0.2): with one, tall trees give the info
-    # tall_tree_on_raft instead of unstable_trunk
+    # any warning will do (the code is incidental: since the bracing of isolated tall
+    # trees the figurine no longer gives unstable_trunk)
     r = pipeline.generate(figurine, NORMAL.updated(raft_enabled=False))
-    issues = [i for i in r.issues if i.code == "unstable_trunk"]
+    issues = [i for i in r.issues if i.severity in ("warning", "error")]
     assert issues
     doubled = issues + [Issue(i.severity, i.code, i.message,
                               None if i.position is None else i.position + np.array([70.0, 0, 0]))

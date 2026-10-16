@@ -45,3 +45,11 @@ L'impression suivante, rapportée par l'utilisateur, a été faite avec la versi
 ## Usage des modèles
 
 Haiku (paramètre `model` de l'outil Agent) a servi à l'audit de code et à cette documentation. Le travail sur la géométrie et le moteur reste sur le modèle par défaut (Opus).
+
+## Mise à jour 2026-10-16 (après l'essai 4)
+
+- Essai 4 (version `aa2e8f8`) : groupe de supports haut et isolé au bout du bras droit renversé par la buse ; dessous plats propres. Détail : `docs/PHYSICAL_TESTS.md`.
+- Corrigé dans la 0.3 : entretoisement des groupes d'arbres hauts instables vers les troncs voisins (figurine 0,2 Normal : 7 groupes isolés -> 0, +5,7 % de volume de supports ; 0,4 Normal : 6 -> 1, signalé `isolated_tall_tree`).
+- Tests : 646 passed, 1 skipped.
+- Prochaine impression à faire : version 0.3 (raft `footprint` + entretoisement), figurine 0,2 Normal ; elle validera ces deux changements ensemble.
+- Reste ouvert : couronnes de pointes irrégulières sous les mains.

@@ -4,6 +4,8 @@ All notable changes to ArborFDM. Format based on [Keep a Changelog](https://keep
 
 ## [0.3.0] - unreleased
 
+- Tall support trees in an unstable group (narrower than height / 5, e.g. the arm-end trees of the figurine that were knocked over in print test 4) are braced to the nearest neighbouring trunks on several levels (printable angle, up to 1.5 x brace_max_length); groups that cannot be braced are reported as `isolated_tall_tree`.
+
 Raft, layers and orientation work on top of 0.2. Nothing here is validated by a new print: the figures come from the OrcaSlicer command line (see `docs/ALGORITHM.md`, sections 4b and 4c).
 
 ### Added

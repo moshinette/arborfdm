@@ -13,6 +13,9 @@ Checks (code -> meaning):
   floating_support     a support component neither reaches the plate nor stands on the model
   disconnected_branch  a tree node whose chain does not end on a foot
   unstable_trunk       tall, slender column with a small foot and no brace near it
+  isolated_tall_tree   a tree taller than brace_min_height whose braced group is too
+                       narrow for its height (tree.braced_group_stable) and could not be
+                       linked to the rest of the supports (warning)
   model_collision      supports overlap the model more than the tips' allowed penetration
   below_plate          support geometry under z = 0
   invalid_support_mesh the merged support mesh is not a closed 2-manifold
@@ -217,6 +220,23 @@ def _check_tree(tree: SupportTree, params, issues):
                             f"Tree of height {h:.1f} mm stands on a {2 * fr:.1f} mm foot with no "
                             f"brace near it: it may wobble or detach (consider {', '.join(hints)})",
                             rn.position.copy()))
+
+    if params.braces_enabled:
+        from .tree import BRACE_GROUP_MAX_ASPECT, braced_groups
+        for g in braced_groups(tree, params):
+            if not g["tall"] or g["stable"]:
+                continue
+            k = int(np.argmax(g["tall_heights"]))
+            pos = tree.nodes[g["tall"][k]].position.copy()
+            n = len(g["feet"])
+            issues.append(Issue(
+                "warning", "isolated_tall_tree",
+                f"{len(g['tall'])} tree(s) up to {max(g['tall_heights']):.1f} mm tall at "
+                f"x={pos[0]:.1f} y={pos[1]:.1f} stand in a braced group of {n} foot/feet, "
+                f"{g['width']:.1f} mm wide, not linked to the rest of the supports (stable "
+                f"when width >= height / {BRACE_GROUP_MAX_ASPECT:.0f}):"
+                " the nozzle may knock it over (consider a raft, a larger foot or reorienting)",
+                pos))
 
     model_feet = [n for n in tree.nodes.values() if n.kind == NodeKind.MODEL_FOOT]
     if model_feet:
