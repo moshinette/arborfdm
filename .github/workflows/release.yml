@@ -4,11 +4,18 @@ name: release
 # The workflow builds the Windows onedir package with PyInstaller, zips it with
 # LICENSE.txt and THIRD_PARTY_NOTICES.txt, computes SHA-256 checksums and creates a
 # DRAFT GitHub release: review it and click "Publish release" yourself.
+# Alternative without pushing a tag: run the workflow by hand ("Run workflow") on main
+# with the "tag" input; the draft release then creates the tag on that commit.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Create this tag on the dispatched commit and draft its release (e.g. v0.3.0). Empty: build only."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -42,10 +49,12 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $ver = python -c "import importlib.metadata as m; print(m.version('arborfdm'))"
-          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$ver") {
-            Write-Error "tag ${{ github.ref_name }} does not match package version $ver"
+          $tag = "${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          if ($tag -and $tag -ne "v$ver") {
+            Write-Error "tag $tag does not match package version $ver"
             exit 1
           }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$ver" >> $env:GITHUB_OUTPUT
 
       - name: Tests (CLI and export)
@@ -88,14 +97,19 @@ jobs:
           retention-days: 30
 
       - name: Draft GitHub release
-        if: github.ref_type == 'tag'
+        if: steps.ver.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $notes = "Windows build of ArborFDM ${{ github.ref_name }}. See CHANGELOG.md. " +
+          $notes = "Windows build of ArborFDM ${{ steps.ver.outputs.tag }}. See CHANGELOG.md. " +
                    "Check the SHA-256 in SHA256SUMS.txt before running. " +
                    "The executable is not code-signed: see docs/PACKAGING.md (SmartScreen, antivirus)."
-          gh release create "${{ github.ref_name }}" --draft --verify-tag `
-            --title "ArborFDM ${{ github.ref_name }}" --notes "$notes" `
+          $tag = "${{ steps.ver.outputs.tag }}"
+          # Publishing a dispatched draft pushes its tag and re-runs this workflow: keep that release.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host "release $tag already exists, nothing to do"; exit 0 }
+          # A pushed tag already exists; a dispatched one is created on this commit.
+          $tagArgs = if ("${{ github.ref_type }}" -eq "tag") { @("--verify-tag") } else { @("--target", "${{ github.sha }}") }
+          gh release create $tag --draft @tagArgs `
+            --title "ArborFDM $tag" --notes "$notes" `
             "dist/${{ steps.pkg.outputs.zip }}" dist/SHA256SUMS.txt dist/THIRD_PARTY_NOTICES.txt

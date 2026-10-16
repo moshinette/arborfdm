@@ -41,7 +41,7 @@ Pour un build reproductible, utiliser les versions figées de la release : `pip 
 ## Release GitHub (`.github/workflows/release.yml`)
 
 1. Mettre à jour `arbor/__init__.py` (`__version__`) et `CHANGELOG.md`, commiter.
-2. `git tag v0.2.0` puis `git push origin v0.2.0`.
+2. `git tag v0.3.0` puis `git push origin v0.3.0`. Sans pousser de tag : onglet *Actions*, workflow *release*, *Run workflow* sur `main` avec le champ `tag` (ex. `v0.3.0`) ; le tag est créé sur ce commit à la publication de la release.
 3. Le workflow (runner `windows-latest`, Python 3.12) installe les versions de `packaging/requirements-build.txt`, vérifie que le tag correspond à la version du paquet, lance les tests CLI/export, PyInstaller, un test de la CLI gelée, crée le zip, `SHA256SUMS.txt`, et une **release brouillon** avec le zip, les sommes et `THIRD_PARTY_NOTICES.txt`. Le zip est aussi disponible 30 jours en artefact du workflow.
 4. Relire la release brouillon (notes, fichiers), tester le zip sur une machine Windows, puis cliquer *Publish release*.
 
