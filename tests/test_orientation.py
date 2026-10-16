@@ -63,3 +63,71 @@ def test_subsampling_fast():
 
 def test_empty():
     assert suggest_orientations(trimesh.Trimesh()) == []
+
+
+# ---------------------------------------------------------------------------
+# overhang surface metric (% of the mesh area beyond the effective overhang angle)
+# ---------------------------------------------------------------------------
+def _identity():
+    return np.eye(4)
+
+
+def test_surface_metric_cube_on_plate_is_zero():
+    from arbor.core.orientation import overhang_surface
+    a, tot = overhang_surface(trimesh.creation.box((10, 10, 10)), _identity(), 55.0, 0.2)
+    assert a == pytest.approx(0, abs=1e-9) and tot == pytest.approx(600)
+    c = suggest_orientations(trimesh.creation.box((10, 10, 10)))
+    assert c[0].criteria["overhang_surface_pct"] == pytest.approx(0, abs=1e-9)
+    assert c[0].criteria["overhang_surface_area"] == pytest.approx(0, abs=1e-9)
+
+
+def test_surface_metric_cantilever_plate_analytic():
+    from arbor.core.orientation import overhang_surface
+    post = trimesh.creation.box((4, 4, 20))
+    post.apply_translation([0, 0, 10])
+    slab = trimesh.creation.box((20, 4, 2))          # underside 20 x 4, at z = 15..17
+    slab.apply_translation([12, 0, 16])
+    m = trimesh.util.concatenate([post, slab])
+    a, tot = overhang_surface(m, _identity(), 55.0, 0.2)
+    # underside of the slab (80 mm2) is horizontal: overhang; the post bottom is on the plate
+    assert a == pytest.approx(80.0, rel=1e-6)
+    assert tot == pytest.approx(m.area, rel=1e-9)
+    assert 100 * a / tot == pytest.approx(100 * 80 / m.area)
+
+
+def test_surface_metric_same_for_every_candidate_and_matches_engine_mask():
+    from arbor.engine import analysis
+    from arbor.engine.params import SupportParams
+    from arbor.core.transform import apply_transform
+    post = trimesh.creation.box((4, 4, 20))
+    post.apply_translation([0, 0, 10])
+    arm = trimesh.creation.cylinder(1.5, 14)         # tilted arm: faces at all angles
+    arm.apply_transform(trimesh.transformations.rotation_matrix(np.radians(60), [0, 1, 0]))
+    arm.apply_translation([5, 0, 14])
+    m = trimesh.util.concatenate([post, arm])
+    prm = SupportParams()
+    eff = analysis.effective_overhang_angle_deg(prm)
+    cands = suggest_orientations(m, overhang_angle_deg=prm.overhang_angle_deg, n=20,
+                                 effective_angle_deg=eff, layer_height=prm.layer_height)
+    assert len(cands) >= 3
+    for c in cands:
+        placed = apply_transform(m, c.matrix)
+        stats: dict = {}
+        analysis._face_analysis(placed, prm, stats)
+        assert c.criteria["overhang_surface_area"] == pytest.approx(
+            stats["face_overhang_area"], rel=1e-6, abs=1e-6)
+        assert c.criteria["overhang_surface_pct"] == pytest.approx(
+            100 * stats["face_overhang_area"] / placed.area, rel=1e-6, abs=1e-6)
+    # the ranking is still the cost ranking
+    assert [c.cost for c in cands] == sorted(c.cost for c in cands)
+
+
+def test_overhang_level_relative_and_absolute():
+    from arbor.core.orientation import overhang_level
+    ps = [10.0, 20.0, 30.0, 40.0 - 1]
+    assert overhang_level(10.0, ps) == "good" and overhang_level(20.0, ps) == "medium"
+    assert overhang_level(39.0, ps) == "bad"
+    assert overhang_level(3.0, [3.0, 60.0]) == "good" and overhang_level(45.0, [30, 45]) == "bad"
+    # flat set (spread < 5 points): absolute thresholds
+    assert overhang_level(12.0, [12.0, 14.0]) == "medium"
+    assert overhang_level(30.0, [28.0, 30.0]) == "bad"

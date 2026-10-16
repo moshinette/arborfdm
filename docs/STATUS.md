@@ -1,0 +1,47 @@
+# État du projet
+
+Pour reprendre après une interruption : lire ce fichier, puis `docs/ROADMAP.md` (ce qui est fait et ce qui reste) et `CHANGELOG.md` (section 0.3.0).
+
+Dernière mise à jour : 2026-10-16.
+
+## Dépôt
+
+- Branche : `angirard/arborfdm-v0.2` (sortie de `git branch --show-current`).
+- Dernier commit : `aa2e8f8 Hands and tip crowns after 2nd print: island anchoring ring (overnight session), min tip separation = base + line width, single central row on narrow parts, separate 3MF layout by default with a raft; 607 tests`.
+- Itération 0.3 : modifications non commitées à la rédaction de ce fichier.
+
+## Itération 0.3 : fait
+
+- Raft `footprint` par défaut, avec modes `bed` et `feet`, jeu de décollement `raft_release_gap`.
+- Surélévation du modèle au-dessus du raft, automatique (`raft_lift_auto`) ou manuelle (`raft_lift`).
+- Supports creux (`hollow_supports`) et supports allégés dans le trancheur (`light_slicer_supports`), tous deux désactivés par défaut.
+- Pourcentage de surface en surplomb par orientation, pastille colorée.
+- Molette sur le curseur « Cut ».
+- Libellés et infobulles de tous les nouveaux paramètres.
+- Avertissement d'export quand les réglages par objet ne peuvent pas s'appliquer.
+- Documentation : `docs/ALGORITHM.md` (sections 4b et 4c), `docs/ROADMAP.md`, `docs/USER_GUIDE.md`, `docs/LIMITATIONS.md`, `CHANGELOG.md`.
+
+## Reste à faire
+
+1. Valider par impression : raft `footprint` (retrait, jeu de décollement), surélévation automatique, supports creux, supports allégés.
+2. Réglages par pièce dans un seul objet 3MF : impossible aujourd'hui quand le modèle repose sur le raft (`arbor/io/export.py`).
+3. Essayer l'interface graphique sur un vrai Windows (interface gelée, `scripts/run_dev.bat`), y compris « Open in OrcaSlicer ».
+4. Tests : résultat final dans `docs/TEST_REPORT.md`.
+
+## Tests et build
+
+- Tests, depuis la racine du dépôt : `QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider` (CI : `.github/workflows/tests.yml`).
+- Lancement en développement : `scripts/run_dev.sh` (Linux) ou `scripts/run_dev.bat` (Windows).
+- Build Windows : `scripts\build_windows.bat` (Python 3.10.1 à 3.14, 64 bits, 3.12 recommandé ; voir `docs/PACKAGING.md`).
+
+## Mesures
+
+Les scripts de mesure ont été écrits dans le répertoire temporaire de la session, qui n'est pas persistant. Les chiffres et leur protocole sont documentés dans `docs/ALGORITHM.md` (sections 4b et 4c) et `docs/PHYSICAL_TESTS.md`.
+
+## Attribution des impressions
+
+L'impression suivante, rapportée par l'utilisateur, a été faite avec la version livrée au commit `aa2e8f8`, c'est-à-dire AVANT cette itération. Toute analyse de cette impression se rapporte à `aa2e8f8`, jamais à l'itération 0.3.
+
+## Usage des modèles
+
+Haiku (paramètre `model` de l'outil Agent) a servi à l'audit de code et à cette documentation. Le travail sur la géométrie et le moteur reste sur le modèle par défaut (Opus).

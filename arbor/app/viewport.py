@@ -980,11 +980,17 @@ class ViewportContainer(QtWidgets.QWidget):
         sl.setSpacing(theme.SP_S)
         self.clip_label = QtWidgets.QLabel("all", objectName="dim")
         self.clip_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.clip_label.setFixedWidth(50)
+        self.clip_label.setWordWrap(True)
+        self.clip_label.setFixedWidth(64)
+        self.clip_label.setFixedHeight(2 * self.clip_label.fontMetrics().lineSpacing() + 4)
+        self.layer_height = 0.2          # mm, wheel step (set from the current parameters)
+        self._wheel_acc = 0
         self.clip_slider = QtWidgets.QSlider(QtCore.Qt.Vertical)
         self.clip_slider.setRange(0, 1000)
         self.clip_slider.setValue(1000)
-        self.clip_slider.setToolTip("Cut by height: show only what is below this height")
+        self.clip_slider.setToolTip("Cut by height: show only what is below this height.\n"
+                                    "Mouse wheel: one layer per notch (Shift: 10 layers), "
+                                    "up = higher.")
         self.clip_slider.valueChanged.connect(self._on_clip)
         cut = QtWidgets.QLabel("Cut", objectName="dim")
         cut.setToolTip(self.clip_slider.toolTip())
@@ -992,6 +998,8 @@ class ViewportContainer(QtWidgets.QWidget):
         sl.addWidget(cut)
         sl.addWidget(self.clip_slider, 1, QtCore.Qt.AlignHCenter)
         sl.addWidget(self.clip_label)
+        self.clip_slider.installEventFilter(self)
+        side.installEventFilter(self)
 
         mid = QtWidgets.QHBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
@@ -1008,6 +1016,17 @@ class ViewportContainer(QtWidgets.QWidget):
         self._apply_overhang()
 
     def eventFilter(self, obj, ev) -> bool:
+        if ev.type() == QtCore.QEvent.Wheel and obj in (self.clip_slider, self.clip_slider.parent()):
+            # Shift can turn the vertical wheel into a horizontal one on some platforms
+            d = ev.angleDelta()
+            self._wheel_acc += d.y() or d.x()
+            steps = int(self._wheel_acc / 120)
+            if steps:
+                self._wheel_acc -= steps * 120
+                big = bool(ev.modifiers() & QtCore.Qt.ShiftModifier)
+                self.step_layers(steps * (10 if big else 1))
+            ev.accept()
+            return True
         if obj is self.viewport and ev.type() == QtCore.QEvent.Resize:
             # isHidden, not isVisible: also right before the window is first shown
             if not self.banner.isHidden():
@@ -1160,20 +1179,60 @@ class ViewportContainer(QtWidgets.QWidget):
         self._supports_present = bool(present)
         self._apply_overhang()
 
+    def set_layer_height(self, lh: float) -> None:
+        if lh > 0:
+            self.layer_height = float(lh)
+
+    def layer_count(self) -> int:
+        h = self.viewport.scene_height()
+        return max(1, int(np.ceil(h / self.layer_height - 1e-6))) if h > 0 else 0
+
+    def current_layer(self) -> int:
+        """Layer number of the cut (top layer when nothing is cut)."""
+        z = self.viewport.clip_z
+        n = self.layer_count()
+        return n if z is None else max(1, min(n, int(round(z / self.layer_height))))
+
+    def step_layers(self, k: int) -> None:
+        """Move the cut by k layers (k > 0 up). The slider, label and clip height change at
+        once; the geometry is rebuilt by the viewport's 60 ms timer, i.e. once after the last
+        step of a burst."""
+        n_max = self.layer_count()
+        if n_max == 0 or k == 0:
+            return
+        n = min(n_max, max(1, self.current_layer() + int(k)))
+        h = self.viewport.scene_height()
+        self.clip_slider.blockSignals(True)
+        try:
+            if n >= n_max:
+                self.clip_slider.setValue(1000)
+                self._apply_cut(None)
+            else:
+                z = n * self.layer_height
+                self.clip_slider.setValue(int(round(1000 * z / h)))
+                self._apply_cut(z)
+        finally:
+            self.clip_slider.blockSignals(False)
+
     def _on_clip(self, value: int) -> None:
         h = self.viewport.scene_height()
         if value >= 1000 or h <= 0:
+            self._apply_cut(None)
+        else:
+            self._apply_cut(h * value / 1000.0)
+
+    def _apply_cut(self, z: Optional[float]) -> None:
+        if z is None:
             self.clip_label.setText("all")
             self.clip_label.setStyleSheet("")
             self.clip_label.setToolTip("")
             self.viewport.set_clip(None)
         else:
-            z = h * value / 1000.0
-            self.clip_label.setText(f"{z:.1f} mm")
+            self.clip_label.setText(f"L {int(round(z / self.layer_height))} \u00b7 {z:.2f} mm")
             # make an active cut obvious: the model looks sliced open otherwise
             self.clip_label.setStyleSheet(f"color: {theme.CUT_ACTIVE}; font-weight: bold;")
             self.clip_label.setToolTip(f"Cut active: everything above {z:.1f} mm is hidden "
-                                       "(display only). Drag the slider to the top to show all.")
+                                       "(display only). Drag the slider or scroll up to the top to show all.")
             self.viewport.set_clip(z)
 
     def reset_clip(self) -> None:

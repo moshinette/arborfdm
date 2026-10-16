@@ -70,10 +70,11 @@ def _task_repair(progress, mesh):
     return repair_mesh(mesh)
 
 
-def _task_orient(progress, mesh, overhang_angle_deg):
+def _task_orient(progress, mesh, overhang_angle_deg, effective_angle_deg=None, layer_height=0.2):
     from arbor.core.orientation import suggest_orientations
     progress.update(0.1, "Evaluating orientations")
-    return suggest_orientations(mesh, overhang_angle_deg=overhang_angle_deg, n=6)
+    return suggest_orientations(mesh, overhang_angle_deg=overhang_angle_deg, n=6,
+                                effective_angle_deg=effective_angle_deg, layer_height=layer_height)
 
 
 def _task_export(progress, kind: str, path: str, model, supports, raft, params, name):
@@ -513,6 +514,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_banner()
         self.viewport.set_tip_preview(p.params.tip_length, p.params.tip_base_diameter)
         self.viewport.set_overhang_params(p.params.overhang_angle_deg, p.params.layer_height)
+        self.view.set_layer_height(p.params.layer_height)
         user = is_user_key(p.profile_key) and p.profile_key in self.presets.presets
         for a in (self.act_preset_rename, self.act_preset_delete, self.act_preset_export):
             a.setEnabled(user)
@@ -1137,8 +1139,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def suggest_orientation(self) -> None:
         if self.project.has_model:
+            from arbor.engine.analysis import effective_overhang_angle_deg
+            prm = self.project.params
             self._start(_task_orient, {"mesh": self.project.base_mesh.copy(),
-                                       "overhang_angle_deg": self.project.params.overhang_angle_deg},
+                                       "overhang_angle_deg": prm.overhang_angle_deg,
+                                       "effective_angle_deg": effective_overhang_angle_deg(prm),
+                                       "layer_height": prm.layer_height},
                         ("orient", self.project.mesh_version), "Evaluating orientations")
 
     # ------------------------------------------------------------------ generation

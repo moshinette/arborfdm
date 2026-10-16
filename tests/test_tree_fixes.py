@@ -144,7 +144,9 @@ def test_sphere_on_plate_short_supports_stand_on_model_plate():
 
 
 def test_short_support_to_build_plate_has_low_foot_and_no_collar():
-    p = prm()
+    # no raft: this test is about a short support down to the bare plate (the raft is on
+    # by default since the raft-coverage iteration)
+    p = prm().updated(raft_enabled=False)
     m = S.floating_cube(10.0, 1.0)        # underside 1 mm above the plate
     res = pipeline.generate(m.copy(), p)
     act = [c for c in res.contacts if c.enabled]
@@ -203,9 +205,11 @@ def test_tip_base_clearance_ignores_material_below_its_segment(z_base):
 def test_raft_keeps_every_figurine_contact_routed():
     p = prm()
     m = S.figurine()
-    a = pipeline.generate(m.copy(), p)
+    a = pipeline.generate(m.copy(), p.updated(raft_enabled=False))
     b = pipeline.generate(m.copy(), p.updated(raft_enabled=True))
     assert not a.tree.failed and not b.tree.failed, b.tree.failed
     n = sum(c.enabled for c in b.contacts)
     assert overlap(b.support_mesh, build.trimesh_to_manifold(m)) <= _budget(n, p)
-    assert b.support_mesh.bounds[0, 2] >= p.raft_thickness - 1e-3
+    # results are in the model frame: with the model resting on the raft the plate is at
+    # b.plate_z (< 0) and the supports start on the raft top
+    assert b.support_mesh.bounds[0, 2] >= b.plate_z + p.raft_thickness - 1e-3

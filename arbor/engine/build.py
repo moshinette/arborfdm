@@ -14,7 +14,7 @@ import manifold3d as mf
 import numpy as np
 import trimesh
 
-from .params import SupportParams
+from .params import SupportParams, model_on_raft, support_base_z
 from .tree import JOINT_INSET, printable_angle_deg
 from .types import NodeKind, Progress, SupportTree
 
@@ -261,7 +261,7 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
     ch = tree.children()
     out: list[mf.Manifold] = []
     foot_radius = getattr(tree, "foot_radius", {})
-    z_base = getattr(tree, "z_base", P.raft_thickness if P.raft_enabled else 0.0)
+    z_base = getattr(tree, "z_base", support_base_z(P))
     ball = P.tip_shape == "ball"
 
     def seg_radii(child_id: int) -> tuple[float, float]:
@@ -350,6 +350,97 @@ def tree_solids(tree: SupportTree, params: SupportParams, progress: Optional[Pro
     return [s_ for s_ in out if s_ is not None]
 
 
+HOLLOW_SKIP_KINDS = (NodeKind.TIP, NodeKind.MODEL_FOOT)
+
+
+def hollow_min_radius(params: SupportParams) -> float:
+    """Smallest section radius that gets a void: hollow_wall of wall all around a hole
+    of at least 2 line widths (a narrower hole is filled by the slicer's gap fill
+    anyway and only adds a travel and a retraction per layer)."""
+    return float(params.hollow_wall + params.line_width)
+
+
+def hollow_cores(tree: SupportTree, params: SupportParams) -> list[mf.Manifold]:
+    """Sealed inner voids of the wide trunk / branch sections (hollow_supports).
+
+    Along every unbranched chain (same chains as the tube meshing), the runs of
+    consecutive segments whose radius stays >= hollow_min_radius get a core: the same
+    axis with radius r - hollow_wall, shortened by hollow_wall at both ends of the run.
+    Each core lies at least hollow_wall (x cos of the taper, ~1) inside its own solid,
+    hence inside the union, so the void is closed: no hole at the top, the slicer prints
+    perimeters around it and a small bridge over it. Tips, on-model pads, thin branches,
+    junction spheres, feet, collars and the raft stay solid."""
+    P = params
+    nodes = tree.nodes
+    ch = tree.children()
+    w = float(P.hollow_wall)
+    rmin = hollow_min_radius(P)
+    segs = int(P.circle_segments)
+    out: list[mf.Manifold] = []
+    for chain in _chains(tree, ch):
+        run: list[int] = []
+
+        def flush():
+            if len(run) < 2:
+                return
+            pts = np.array([nodes[i].position for i in run], float)
+            rad = np.array([nodes[i].radius for i in run], float) - w
+            if nodes[run[0]].kind == NodeKind.FOOT:
+                rad[0] = nodes[run[1]].radius - w      # outer tube: the child's radius
+                # the chain starts on a foot: the void starts above the foot disc + collar
+                z0 = float(pts[0][2]) + P.foot_height + P.collar_height + w
+                while len(pts) >= 2 and pts[1][2] <= z0:
+                    pts, rad = pts[1:], rad[1:]
+                if len(pts) < 2:
+                    return
+                d = pts[1] - pts[0]
+                if pts[0][2] < z0 and d[2] > 1e-9:
+                    t = (z0 - pts[0][2]) / d[2]
+                    pts[0] = pts[0] + t * d
+                    rad[0] = rad[0] + t * (rad[1] - rad[0])
+            else:
+                d = pts[1] - pts[0]
+                L0 = float(np.linalg.norm(d))
+                if L0 <= w + 1e-6:
+                    pts, rad = pts[1:], rad[1:]
+                else:
+                    pts[0] = pts[0] + d / L0 * w
+            if len(pts) < 2:
+                return
+            d = pts[-1] - pts[-2]
+            L1 = float(np.linalg.norm(d))
+            if L1 <= w + 1e-6:
+                pts, rad = pts[:-1], rad[:-1]
+            else:
+                pts[-1] = pts[-1] - d / L1 * w
+            if len(pts) < 2 or float(np.linalg.norm(pts[-1] - pts[0])) < 2 * w:
+                return
+            if np.any(rad < P.line_width - 1e-9):
+                return
+            m = tube(pts, rad, segs) if len(pts) > 2 else None
+            if m is not None:
+                out.append(m)
+            else:
+                for k in range(1, len(pts)):
+                    c = cone_between(pts[k - 1], pts[k], rad[k - 1], rad[k], segs)
+                    if c is not None:
+                        out.append(c)
+
+        for k in range(1, len(chain)):
+            a, b = nodes[chain[k - 1]], nodes[chain[k]]
+            ok = (b.kind not in HOLLOW_SKIP_KINDS and a.kind not in HOLLOW_SKIP_KINDS
+                  and min(a.radius, b.radius) >= rmin)
+            if ok:
+                if not run:
+                    run.append(a.id)
+                run.append(b.id)
+            else:
+                flush()
+                run = []
+        flush()
+    return out
+
+
 def _tree_groups(tree: SupportTree) -> list[list[int]]:
     """Node ids grouped by tree (root)."""
     root_of: dict[int, int] = {}
@@ -382,7 +473,7 @@ def mesh_tree_manifold(tree: SupportTree, params: SupportParams,
     union = mf.Manifold.batch_boolean(solids, mf.OpType.Add)
     # Tilted tube ends and spheres near the feet can dip below the support base; nothing may
     # exist under it (plate, or raft top which the raft mesh fills).
-    z_base = getattr(tree, "z_base", params.raft_thickness if params.raft_enabled else 0.0)
+    z_base = getattr(tree, "z_base", support_base_z(params))
     union = union.trim_by_plane((0.0, 0.0, 1.0), float(z_base))
     # Two solids that almost touch can leave a separate fragment of (near) zero volume after
     # the union; it cannot be printed and would show up as a floating sliver in a slicer.
@@ -391,6 +482,11 @@ def mesh_tree_manifold(tree: SupportTree, params: SupportParams,
         keep = [q for q in parts if q.volume() >= MIN_PART_VOLUME]
         if 0 < len(keep) < len(parts):
             union = mf.Manifold.compose(keep)
+    if params.hollow_supports:
+        # after the fragment filter: decompose() returns each sealed void as its own part
+        cores = hollow_cores(tree, params)
+        if cores:
+            union = union - mf.Manifold.batch_boolean(cores, mf.OpType.Add)
     return union
 
 
@@ -407,9 +503,58 @@ def mesh_tree(tree: SupportTree, params: SupportParams, progress: Optional[Progr
 # ---------------------------------------------------------------------------
 # raft
 # ---------------------------------------------------------------------------
+def _feet_disks(tree: SupportTree, params: SupportParams):
+    """(xy (n, 2), radius (n,)) of the plate / raft feet."""
+    feet = [n for n in tree.nodes.values() if n.kind == NodeKind.FOOT]
+    fr = getattr(tree, "foot_radius", {})
+    xy = np.array([n.position[:2] for n in feet]).reshape(-1, 2)
+    rad = np.array([max(fr.get(n.id, params.foot_diameter / 2), n.radius) for n in feet])
+    return xy, rad
+
+
 def raft_polygon(tree: SupportTree, params: SupportParams):
-    """2D raft outline (shapely) or None: convex hull of each cluster of feet, offset by
-    raft_margin, minus the model footprint keep-out."""
+    """2D raft outline (shapely) or None, according to raft_coverage:
+
+    "feet"      convex hull of each cluster of feet, offset by raft_margin, minus the
+                model footprint keep-out (pieces joined by a ring around the footprint);
+    "footprint" one plate: convex hull of the model base (tree.model_base) and of the
+                feet, offset by raft_margin; the model rests on it;
+    "bed"       bounding rectangle of the model (tree.model_xy_bounds) and of the feet,
+                offset by raft_margin (never the physical build plate)."""
+    from shapely.geometry import MultiPoint, Point, box
+    from shapely.ops import unary_union
+
+    P = params
+    if model_on_raft(P):
+        xy, rad = _feet_disks(tree, P)
+        disks = [Point(xy[i]).buffer(rad[i], 16) for i in range(len(xy))]
+        base = getattr(tree, "model_base", None)
+        if P.raft_coverage == "bed":
+            parts = list(disks)
+            b = getattr(tree, "model_xy_bounds", None)
+            if b is not None:
+                parts.append(box(*b))
+            if base is not None:
+                parts.append(base)
+            if not parts:
+                return None
+            poly = box(*unary_union(parts).bounds).buffer(P.raft_margin, join_style=2)
+        else:
+            pts = [pt for d in disks for pt in d.exterior.coords]
+            if base is not None and not base.is_empty:
+                pts += list(base.convex_hull.exterior.coords) if base.convex_hull.geom_type == "Polygon" \
+                    else list(base.convex_hull.coords)
+            if not pts:
+                return None
+            poly = MultiPoint(pts).convex_hull.buffer(P.raft_margin, 16)
+        if poly.is_empty or poly.area < 1e-6:
+            return None
+        return poly
+    return _raft_polygon_feet(tree, P)
+
+
+def _raft_polygon_feet(tree: SupportTree, params: SupportParams):
+    """raft_coverage "feet" (v0.1 behaviour), see raft_polygon."""
     from shapely.geometry import MultiPoint, Point
     from shapely.ops import unary_union
     from scipy.spatial import cKDTree
@@ -480,4 +625,8 @@ def mesh_raft(tree: SupportTree, params: SupportParams) -> Optional[trimesh.Trim
         return None
     cs = mf.CrossSection(contours, mf.FillRule.EvenOdd)
     m = mf.Manifold.extrude(cs, float(params.raft_thickness))
+    # the raft top is the support base: [0, t] under the feet only (the model is on the
+    # plate), [-t, 0] when the model rests on the raft (params.support_base_z)
+    z_top = float(getattr(tree, "z_base", support_base_z(params)))
+    m = m.translate((0.0, 0.0, z_top - float(params.raft_thickness)))
     return manifold_to_trimesh(m)

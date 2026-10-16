@@ -112,7 +112,9 @@ def test_generate_shelf_full(tmp_path, capsys):
     assert validate_export(out) == []
     content = read_3mf(out)
     names = [p.name for p in content.parts]
-    assert names[0] == "shelf" and "shelf supports" in names
+    # v0.2 default raft under the model (with a release gap): the model does not touch
+    # the plate, so the separate layout writes one object to keep the alignment
+    assert names == ["shelf with supports"] or (names[0] == "shelf" and "shelf supports" in names)
     params = json.loads(content.metadata["arbor:support_params"])
     assert params["tip_diameter"] == 0.5
     for p in content.parts:                     # our reader (bit-identical merge)
@@ -197,7 +199,10 @@ def test_generate_components_layout(tmp_path):
 
 def test_generate_separate_layout_with_layer_heights(tmp_path, capsys):
     out, js = tmp_path / "sep.3mf", tmp_path / "r.json"
+    # two objects on the plate: raft under the feet only (with the v0.2 default raft
+    # under the model, the separate layout writes one object)
     rc = main(["generate", _ex("shelf"), "-o", str(out), "--set", "raft_enabled=true",
+               "--set", "raft_coverage=feet",
                "--layout", "separate", "--model-layer-height", "0.12",
                "--support-layer-height", "0.24", "--json", str(js)])
     assert rc == EXIT_OK
@@ -290,8 +295,10 @@ def test_generate_open_in_orca_without_output(orca_env, capsys):
     js = orca_env / "r.json"
     src = Path(_ex("shelf"))
     before = src.read_bytes()
+    # raft under the feet only: model and supports are two objects (one with the
+    # v0.2 default raft under the model)
     rc = main(["generate", str(src), "--open-in-orca", "--orca-path", str(exe),
-               "--model-layer-height", "0.12", "--support-layer-height", "0.24", "--json", str(js)])
+               "--set", "raft_coverage=feet", "--model-layer-height", "0.12", "--support-layer-height", "0.24", "--json", str(js)])
     assert rc == EXIT_OK
     _wait(rec)
     files = list((orca_env / "to_slicer").glob("*.3mf"))
@@ -357,8 +364,10 @@ def test_default_layout_is_separate_with_raft(tmp_path):
     import zipfile
     from arbor.cli import main
     out = tmp_path / "raft.3mf"
+    # raft under the feet only (v0.1 raft): the model stays on the plate; with the v0.2
+    # default raft under the model the scene is one object (tests/test_raft_lift.py)
     rc = main(["generate", str(ROOT / "examples" / "shelf.stl"), "-o", str(out), "-q",
-               "--set", "raft_enabled=true"])
+               "--set", "raft_enabled=true", "--set", "raft_coverage=feet"])
     assert rc in (0, 1)
     with zipfile.ZipFile(out) as z:
         xml = z.read("3D/3dmodel.model").decode()

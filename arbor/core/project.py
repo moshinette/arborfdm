@@ -780,6 +780,7 @@ class Project:
         # unknown keys (from a newer version) are ignored rather than failing the load
         known = set(SupportParams().to_dict())
         values = {k: v for k, v in data.get("params", {}).items() if k in known}
+        values = {**_legacy_param_defaults(data.get("params", {})), **values}
         self.params = SupportParams.from_dict({**self.profiles[key].params.to_dict(), **values})
         self.contacts = [Contact.from_dict(c) for c in data.get("contacts", [])]
         self.contacts_edited = bool(data.get("contacts_edited", bool(self.contacts)))
@@ -790,6 +791,16 @@ class Project:
         self.undo_stack.clear()
         for ev in ("mesh", "transform", "params", "contacts", "result", "selection", "dirty"):
             self._emit(ev)
+
+
+def _legacy_param_defaults(saved: dict) -> dict:
+    """Values that keep the behaviour of a project saved before a parameter existed
+    (its saved params hold every field of its version): before raft_coverage, the raft
+    covered the feet only and the model stood on the plate."""
+    out = {}
+    if isinstance(saved, dict) and saved and "raft_coverage" not in saved:
+        out["raft_coverage"] = "feet"
+    return out
 
 
 # ---------------------------------------------------------------------------

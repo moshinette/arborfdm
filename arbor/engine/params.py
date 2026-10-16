@@ -13,6 +13,10 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+RAFT_COVERAGES = ("feet", "footprint", "bed")
+RAFT_LIFT_MAX = 5.0          # mm: largest model lift above the raft (auto or manual)
+RAFT_RELEASE_GAP_MAX = 0.5   # mm: largest release gap between raft and model
+
 PROFILE_DIR = Path(__file__).resolve().parent.parent.parent / "profiles"
 
 
@@ -83,9 +87,39 @@ class SupportParams:
     brace_max_length: float = 12.0
 
     # --- raft ---------------------------------------------------------------
-    raft_enabled: bool = False
+    raft_enabled: bool = True
     raft_thickness: float = 0.8
     raft_margin: float = 2.0
+    # raft_coverage (docs/ALGORITHM.md, "Raft"):
+    #   "feet"      raft under the feet only (hulls of the foot clusters, minus the model
+    #               footprint, joined by a ring); the model stands on the plate (v0.1)
+    #   "footprint" one plate = convex hull of the model base + the feet, + raft_margin;
+    #               the model rests on the raft
+    #   "bed"       bounding rectangle of the model and the feet, + raft_margin (never
+    #               the physical plate); the model rests on the raft
+    raft_coverage: str = "footprint"
+    # Export only: in the "separate" 3MF layout, write "2 walls, 10 % infill, no solid small
+    # areas" on the supports object for OrcaSlicer / Bambu Studio (-31 % material and time on
+    # the figurine's supports, measured with Orca CLI). Off by default: not validated by print.
+    light_slicer_supports: bool = False
+    # Model lift above the raft (only when the model rests on the raft: coverage
+    # "footprint" / "bed"). raft_lift_auto: raise the model by the smallest amount that
+    # leaves room for a full tip under overhangs that are too close to the raft, unless
+    # that would make things worse (flat base to support); see placement.plan_lift.
+    # raft_lift: lift used when raft_lift_auto is False (0 = model on the raft).
+    raft_lift_auto: bool = True
+    raft_lift: float = 0.0
+    # Model on the raft: release gap between the raft top and the bottom of the model,
+    # under the whole footprint (the slicer prints the first model layer over it like a
+    # support interface, so the raft peels off). One layer height in the profiles;
+    # 0 = model welded onto the raft.
+    raft_release_gap: float = 0.12
+
+    # --- hollow supports ----------------------------------------------------
+    # Wide trunk / branch sections get a sealed inner void, hollow_wall thick walls
+    # (tips, thin branches, feet and raft stay solid). Off by default.
+    hollow_supports: bool = False
+    hollow_wall: float = 1.26           # 3 line widths
 
     # --- supports standing on the model -------------------------------------
     allow_on_model: bool = True
@@ -130,12 +164,20 @@ class SupportParams:
                 p.append(f"{name} must be > 0")
         non_negative = ("merge_distance", "min_region_area", "tip_penetration", "z_gap", "xy_clearance",
                         "trunk_growth_per_mm", "min_tree_distance", "foot_height", "collar_height",
-                        "brace_min_height", "raft_margin")
+                        "brace_min_height", "raft_margin", "raft_lift", "raft_release_gap")
         for name in non_negative:
             if getattr(self, name) < 0:
                 p.append(f"{name} must be >= 0")
         if self.raft_enabled and self.raft_thickness <= 0:
             p.append("raft_thickness must be > 0 when the raft is enabled")
+        if self.raft_coverage not in RAFT_COVERAGES:
+            p.append("raft_coverage must be one of " + ", ".join(RAFT_COVERAGES))
+        if self.raft_release_gap > RAFT_RELEASE_GAP_MAX:
+            p.append(f"raft_release_gap must be <= {RAFT_RELEASE_GAP_MAX:g} mm")
+        if self.raft_lift > RAFT_LIFT_MAX:
+            p.append(f"raft_lift must be <= {RAFT_LIFT_MAX:g} mm")
+        if self.hollow_supports and self.hollow_wall < 2 * self.line_width:
+            p.append("hollow_wall must be >= 2 line widths")
         if self.junction_radius_factor < 1.0:
             p.append("junction_radius_factor must be >= 1")
         if not 0.1 <= self.nozzle_diameter <= 1.2:
@@ -167,6 +209,26 @@ class SupportParams:
         if self.tip_shape not in ("cone", "ball"):
             p.append("tip_shape must be 'cone' or 'ball'")
         return p
+
+
+def model_on_raft(params: SupportParams) -> bool:
+    """True when the model rests on the raft (coverage "footprint" / "bed")."""
+    return bool(params.raft_enabled) and params.raft_coverage != "feet"
+
+
+def support_base_z(params: SupportParams) -> float:
+    """z (engine frame) of the surface the supports stand on (raft top or plate).
+
+    The model's own ground is always z = 0 (analysis and contacts treat what is printed
+    on it as resting). Raft under the feet only: the model is on the plate and the raft
+    occupies [0, raft_thickness]. Model on the raft: the raft top is raft_release_gap
+    below the model's ground, the raft occupies [-gap - raft_thickness, -gap] (the model
+    is never moved when it is not lifted)."""
+    if not params.raft_enabled:
+        return 0.0
+    if params.raft_coverage == "feet":
+        return float(params.raft_thickness)
+    return -float(params.raft_release_gap)
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ import trimesh
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from .params import SupportParams
+from .params import SupportParams, model_on_raft, support_base_z
 from .types import Contact, NodeKind, Progress, SupportTree
 
 BIG = 1000.0  # "far from the model" distance (mm)
@@ -287,6 +287,24 @@ def _init_tree_extras(tree: SupportTree, z_base: float) -> None:
     tree.foot_radius = {}           # FOOT node id -> disk radius actually used
     tree.failed = {}                # contact id -> reason (not routed)
     tree.raft_keepout = None        # shapely geometry the raft must avoid (model footprint)
+    tree.model_base = None          # model on the raft: hull of its base on the ground
+    tree.model_xy_bounds = None     # model on the raft: XY bounds of the model
+
+
+def _model_outline(tree: SupportTree, mesh: trimesh.Trimesh, params: SupportParams) -> None:
+    """XY outlines the raft needs when the model rests on it (build.raft_polygon):
+    tree.model_base = convex hull of the model vertices on the first layer above the
+    ground (None if the model does not touch the ground, i.e. it is lifted);
+    tree.model_xy_bounds = (xmin, ymin, xmax, ymax) of the whole model."""
+    from shapely.geometry import MultiPoint
+    V = np.asarray(mesh.vertices, float)
+    if not len(V):
+        return
+    tree.model_xy_bounds = tuple(float(x) for x in (*V[:, :2].min(axis=0), *V[:, :2].max(axis=0)))
+    low = V[V[:, 2] <= params.layer_height]          # model ground: z = 0
+    if len(low) >= 1:
+        hull = MultiPoint([tuple(p) for p in low[:, :2]]).convex_hull
+        tree.model_base = hull.buffer(max(params.line_width, 0.1)) if hull.area < 1e-6 else hull
 
 
 def tip_direction(normal: np.ndarray, max_angle_deg: float, extra_tilt: bool = False) -> np.ndarray:
@@ -335,16 +353,26 @@ class _UF:
 def build_tree(mesh: trimesh.Trimesh, contacts: list[Contact], params: SupportParams,
                progress: Progress) -> SupportTree:
     progress = progress or Progress()
-    z_base = params.raft_thickness if params.raft_enabled else 0.0
+    z_base = support_base_z(params)
+    # Model on the raft with a release gap: the trees are routed on the model's ground
+    # (z = 0, the same level grid as without gap, so the gap does not reshuffle the
+    # routing), then their feet are lowered onto the raft top (z_base = -gap).
+    z_route = max(z_base, 0.0)
     tree = SupportTree()
-    _init_tree_extras(tree, z_base)
+    _init_tree_extras(tree, z_route)
+    if model_on_raft(params):
+        _model_outline(tree, mesh, params)
     contacts = [c for c in contacts if c.enabled]
     for c in contacts:
         c.rests_on_model = False
-    if not contacts:
-        return tree
-    router = _Router(mesh, contacts, params, tree, progress)
-    router.run()
+    if contacts:
+        router = _Router(mesh, contacts, params, tree, progress)
+        router.run()
+    if z_base < z_route:
+        for n in tree.nodes.values():
+            if n.kind == NodeKind.FOOT and n.position[2] <= z_route + 1e-9:
+                n.position = np.array([n.position[0], n.position[1], z_base])
+        tree.z_base = z_base
     return tree
 
 
@@ -376,7 +404,7 @@ class _Router:
         self._stabilize_feet()
         if P.braces_enabled:
             self._braces()
-        if P.raft_enabled:
+        if P.raft_enabled and not model_on_raft(P):
             self._raft_keepout()
         prog.update(1.0, "Tree done")
 
@@ -476,6 +504,14 @@ class _Router:
             else:
                 tip_pos = pos - n * P.tip_penetration
             tip_pos = tip_pos - np.array([0.0, 0.0, P.z_gap])
+            if P.raft_enabled and not model_on_raft(P) and pos[2] < zb + self.min_short_gap() - 1e-9:
+                # raft under the feet only: the model stands on the plate and the raft
+                # top is raft_thickness higher; a contact this low has no room for a
+                # support of its own (it would have to start inside the raft)
+                tree.failed[c.id] = (f"contact {pos[2]:.2f} mm above the plate, below the raft top "
+                                     f"({zb:.2f} mm) + one layer: with the raft under the feet only "
+                                     "no support fits there (use raft_coverage 'footprint')")
+                continue
             if pos[2] - zb < 0.05:
                 tree.failed[c.id] = "contact lies on the build plate"
                 continue

@@ -46,6 +46,7 @@ from scipy.spatial import cKDTree
 from .params import SupportParams
 from .types import AnalysisResult, Contact, ContactReason, Issue, NodeKind, Progress, SupportTree
 
+VOID_BRIDGE_MAX_AREA = 4.0  # mm2: a closed hole of the layer below up to this is bridged
 PLATE_EPS = 0.3          # a foot is on the plate if within this of z_base
 SLENDER_RATIO = 18.0     # column height / foot radius above which a trunk is flagged
 COLLISION_ERROR_FACTOR = 3.0   # overlap above this multiple of the tip budget is an error
@@ -234,10 +235,10 @@ def _check_mesh(mesh, support_mesh, tree, contacts, params, issues, support_man=
                             "slicers may misread it"))
 
     z_base = float(getattr(tree, "z_base", 0.0))
-    if support_mesh.bounds[0, 2] < -1e-3:
+    if support_mesh.bounds[0, 2] < z_base - 1e-3:
         issues.append(Issue("error", "below_plate",
-                            f"Support geometry goes {-support_mesh.bounds[0, 2]:.2f} mm below the "
-                            "build plate"))
+                            f"Support geometry goes {z_base - support_mesh.bounds[0, 2]:.2f} mm below the "
+                            "build plate / raft top"))
 
     # floating components (mesh level, independent of the tree bookkeeping)
     mf_pts = np.array([n.position for n in tree.nodes.values()
@@ -415,10 +416,14 @@ def support_layer_regions(support_mesh, params: SupportParams, z_base: float = 0
             unsup = unsup - (mf.CrossSection.batch_boolean(island_cs, mf.OpType.Add)
                              if len(island_cs) > 1 else island_cs[0])
         if not unsup.is_empty() and unsup.area() >= min_area:
+            # small closed holes of the layer below (sealed void of a hollow trunk, gap
+            # enclosed by merged branches) are capped by a short bridge, not an overhang
+            caps = [Polygon(r) for p_ in prev_polys for r in p_.interiors
+                    if Polygon(r).area <= VOID_BRIDGE_MAX_AREA]
             for _, poly in cs_components(unsup):
                 if poly.area < min_area:
                     continue
-                hold = shapely.union_all([model_poly(i - 1).buffer(d), model_poly(i)])
+                hold = shapely.union_all([model_poly(i - 1).buffer(d), model_poly(i)] + caps)
                 rest = poly.difference(hold) if not hold.is_empty else poly
                 if rest.is_empty or rest.area < min_area:
                     continue

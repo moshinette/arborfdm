@@ -22,6 +22,15 @@ Liste tenue à jour à partir des rapports des sous-agents et de la revue QA (`d
 - Les contacts automatiques modifiés pendant une génération complète en cours ne peuvent pas être rejoués : ils sont signalés comme perdus.
 - Modèles de plus de 1000 mm refusés ; au-delà d'environ 1 M de triangles, compter environ 2 Go de mémoire pour un passage complet par la CLI (mesuré par la QA).
 
+## Raft, surélévation et supports (0.3)
+
+- Stabilité d'un modèle surélevé au-dessus du raft : seul le critère de base plate (25 mm² au maximum) est évalué ; ni centre de gravité ni nombre de pieds.
+- Le seuil de 25 mm² (`LIFT_MAX_BASE_AREA`) est empirique, non validé par impression.
+- Réglages par objet du trancheur (hauteur de couche, `object_settings`) impossibles quand le modèle repose sur le raft : le 3MF ne contient alors qu'un objet, donc « lighter supports » ne s'applique pas.
+- Supports creux et supports allégés : mesurés dans OrcaSlicer 2.4.2 seulement, non validés par impression ; ils ne se cumulent pas ; le creux ne tient pas compte de `fragile_support` et n'a pas d'effet avec la buse 0,4.
+- Raft `footprint` par défaut : retrait du modèle sur impression non validé (mesures au trancheur seulement).
+- Pourcentages et couleurs de surface en surplomb par orientation : indication, pas garantie ; leurs seuils (relatifs et absolus) sont empiriques.
+
 ## Interface
 
 - La coupe par hauteur recalcule la géométrie affichée (environ 0,5 s sur 1 M de triangles).

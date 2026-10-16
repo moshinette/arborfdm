@@ -2,6 +2,24 @@
 
 All notable changes to ArborFDM. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) (0.x: anything may still change).
 
+## [0.3.0] - unreleased
+
+Raft, layers and orientation work on top of 0.2. Nothing here is validated by a new print: the figures come from the OrcaSlicer command line (see `docs/ALGORITHM.md`, sections 4b and 4c).
+
+### Added
+- Raft coverage `raft_coverage`: `footprint` (default: one plate under the model base and feet, the model resting on it with a release gap), `bed` (bounding rectangle of model and feet, never the whole printer bed) and `feet` (version 0.1 behaviour).
+- Release gap `raft_release_gap` between raft and model (one layer in the built-in profiles; 0 welds the base to the raft).
+- Model lift above the raft: automatic (`raft_lift_auto`, up to 5 mm, refused with warning `raft_lift_refused` when the flat base exceeds 25 mm²) or manual (`raft_lift`). Only applies when the model rests on the raft.
+- Hollow supports `hollow_supports` (off by default, wall `hollow_wall` = 3 line widths): -13 % filament and -4 % time on the supports.
+- Lighter supports in the slicer `light_slicer_supports` (off by default): 2 walls, 10 % infill and no minimum sparse infill area, on the supports object only: -31 % filament and -24 % time on the supports. Needs raft `feet` or no raft.
+- Overhang surface percentage for each orientation candidate, coloured green, orange or red.
+- Mouse wheel on the Cut slider: one layer per notch, Shift for 10 layers (3D rebuild throttled to 60 ms).
+- Labels and tooltips for all new parameters in the Advanced tab.
+
+### Changed
+- Raft enabled by default (parameters and built-in profiles). Projects `.arbor` saved earlier keep raft coverage `feet`; format-1 user presets keep their raft state.
+- When the model rests on the raft, the "separate objects" 3MF is a single object: per-object layer heights and lighter supports cannot apply, and the export now says so explicitly ("Lighter supports not applied...").
+
 ## [0.2.0] - unreleased
 
 First public release. Profiles are still **not validated by systematic print tests**: see `docs/LIMITATIONS.md`.

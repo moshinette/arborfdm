@@ -1,7 +1,10 @@
 """Shared data types of the support engine.
 
-Coordinate frame (everywhere in the engine): millimetres, Z up, build plate at z = 0.
-The model mesh handed to the engine is already transformed and placed on the plate.
+Coordinate frame (everywhere in the engine): millimetres, Z up, ground at z = 0.
+The model mesh handed to the engine is already transformed and placed on the ground:
+the build plate, or the raft top when the model rests on the raft (the raft is then
+below z = 0; with a model lift the engine runs on the model raised by the lift and
+translates its results back, see placement.py).
 """
 from __future__ import annotations
 
@@ -148,6 +151,12 @@ class GenerationResult:
     # support_mass_g, contact_area_mm2, model_contacts, max_tree_height_mm,
     # max_slenderness, issues_by_code, ...); empty if not computed
     stats: dict = field(default_factory=dict)
+    # model placement (placement.plan_lift): the model is never moved; the supports and
+    # the raft are placed under it. model_lift = height of the model above the raft top
+    # (mm); plate_z = z of the build plate in the model frame (0 when the model stands
+    # on the plate, -(raft_thickness + model_lift) when it rests on the raft)
+    model_lift: float = 0.0
+    plate_z: float = 0.0
 
     @property
     def errors(self) -> list[Issue]:

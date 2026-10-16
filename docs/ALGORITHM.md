@@ -83,7 +83,63 @@ Les positions sont projetées verticalement sur le modèle (lancer de rayons ver
 
 ## 4. Maillage (`build.py`)
 
-Chaque chaîne non ramifiée devient un tube lissé ; sphères aux jonctions (rayon x `junction_radius_factor`), pieds, collerettes, plots sur le modèle, entretoises : primitives manifold3d fusionnées par un seul `batch_boolean(Add)`. Le résultat est fermé par construction, puis coupé par le plan du plateau (rien sous z = 0). Le raft est l'enveloppe des pieds, élargie de `raft_margin`, moins l'empreinte du modèle.
+Chaque chaîne non ramifiée devient un tube lissé ; sphères aux jonctions (rayon x `junction_radius_factor`), pieds, collerettes, plots sur le modèle, entretoises : primitives manifold3d fusionnées par un seul `batch_boolean(Add)`. Le résultat est fermé par construction, puis coupé par le plan de base des supports (`tree.z_base` : plateau ou dessus du raft). Raft : section 4b. Supports creux : section 4c.
+
+## 4b. Raft et surélévation (`params.raft_*`, `placement.py`, `build.raft_polygon`)
+
+Le raft est activé par défaut (paramètres et profils intégrés). Les projets `.arbor` enregistrés avant `raft_coverage` gardent leur comportement (`project._legacy_param_defaults` : raft « feet »), comme les presets utilisateur au format 1 (voir plus bas).
+
+**Repères.** Le modèle n'est jamais déplacé ni modifié : il reste à z = 0 dans le repère de l'utilisateur, tout le reste est placé dessous. `GenerationResult.model_lift` (surélévation) et `plate_z` (plateau dans le repère du modèle) décrivent le placement ; l'export 3MF (`positive_octant`) remonte la scène entière, les positions relatives sont conservées.
+
+| `raft_coverage` | Contour | Modèle | Base des supports (`z_base`) | Raft |
+|---|---|---|---|---|
+| `feet` (v0.1) | enveloppe de chaque grappe de pieds + `raft_margin`, moins l'empreinte du modèle, morceaux reliés par un anneau | sur le plateau | `raft_thickness` | [0, t] |
+| `footprint` (défaut) | une seule plaque : enveloppe convexe de la base du modèle (sommets à moins d'une couche du sol) et des disques des pieds, + `raft_margin` | posé sur le raft, jeu g | -g | [-g-t, -g] |
+| `bed` | rectangle englobant du modèle (projection XY entière) et des pieds, + `raft_margin` ; jamais la surface du plateau | posé sur le raft, jeu g | -g | [-g-t, -g] |
+
+Mesures (figurine, 0,2 Normal, A1 mini, OrcaSlicer 2.4.2 en ligne de commande, 0,08 mm, export « Open in OrcaSlicer ») :
+
+| Mode | Surface du raft | Volume du raft | Supports | Scène entière (Orca) |
+|---|---|---|---|---|
+| `feet` | 800 mm² | 128 mm³ | 2973 mm³ | 9,58 g, 3 h 41 min 34 s |
+| `footprint` | 1587 mm² | 254 mm³ | 2919 mm³ | 9,56 g, 3 h 39 min 38 s |
+| `bed` | 2331 mm² | 373 mm³ | 2919 mm³ | 9,73 g, 3 h 42 min 32 s |
+
+**Jeu de décollement** g = `raft_release_gap` (une couche dans les profils : 0,08 / 0,12 mm ; 0 = soudé) : le dessus du raft est g sous le fond du modèle, sur toute l'empreinte. L'analyse et les contacts gardent le sol du modèle à z = 0 (la base n'est pas supportée) ; les supports partent du dessus du raft. Mesure G-code (figurine, Orca 2.4.2, A1 mini 0,2, 0.08mm Optimal, disque de 12 mm sous le socle) : raft aux couches z = 0,10 et 0,18 ; couche 0,26 vide sous le socle ; première couche du modèle à z = 0,34 imprimée en « Bridge » (3156 mm de trajet) au-dessus du raft, comme une interface de support. Avec g = 0 : remplissage solide continu de 0,10 à 0,42 (socle soudé). Tranchage accepté (retour 0, sans « empty first layer »), 9,57 g, 3 h 37 min ; pointes à 0,03 mm du modèle au plus.
+
+Mode `feet` : un contact plus bas que le dessus du raft + une couche (`raft_thickness` + `layer_height` au-dessus du plateau) n'a pas la place d'un support (il partirait dans le raft) : il est signalé (`unrouted_contact`, raison « below the raft top ... use raft_coverage 'footprint' ») au lieu de rester sans pointe ni explication. Router un support court posé sur le plateau dans le trou du raft demanderait de couper les supports sous `z_base` localement ; non retenu (1 à 2 couches de support, le mode `footprint` les supporte normalement).
+
+Presets utilisateur au format 1 (avant v0.2, raft désactivé dans les profils) : sans mention du raft, il reste désactivé ; activé, il garde `raft_coverage = feet` (`presets.LEGACY_V1_VALUES`, format 2 depuis).
+
+Le surcoût du raft commun est faible (+0,2 mm³ de raft par mm² ; le mode `footprint` coûte même un peu moins au total, car les supports partent 0,16 mm plus bas sans contourner l'empreinte). Retrait : en `feet`, le modèle est imprimé sur le plateau et le raft ne touche que les pieds ; en `footprint` / `bed`, la base repose sur le raft à travers le jeu de décollement (pont d'une couche, détachable comme une interface) ; avec `raft_release_gap = 0` elle est soudée et le raft se découpe au ras du socle. Les mesures du tableau sont sans jeu (g = 0) ; avec le jeu : 9,57 g, 3 h 37 min. Le mode `bed` ajoute surtout de la surface (adhérence) sans tenir mieux les pieds que `footprint`.
+
+Conséquence export : un modèle posé sur le raft ne touche pas le plateau ; la disposition `separate` écrit alors un seul objet « ... with supports » (sinon le trancheur le poserait sur le plateau et l'alignement serait perdu), donc les réglages par objet (`layer_heights`, `object_settings`) s'appliquent au modèle et aux supports ensemble.
+
+**Surélévation automatique** (`raft_lift_auto`, modèle posé sur le raft uniquement). Dégagement requis c = `tip_length` + `branch_min_diameter`/2 + 0,1 + 2 couches (1,91 mm en 0,2 ; 2,44 mm en 0,4), la même portée que le test « support court » du routage plus deux couches de pied. Si des faces en surplomb (angle effectif de l'analyse, hors première couche) ont leur point bas à moins de c du sol, pour au moins `min_region_area`, le modèle est surélevé de L = c - (point bas le plus bas des faces en surplomb, base comprise), arrondi à 0,01 mm, borné à `RAFT_LIFT_MAX` = 5 mm. Son fond devient un îlot de l'analyse et est supporté par la détection existante (contact d'îlot, couronne d'ancrage, remplissage). Refus (L = 0, avertissement `raft_lift_refused` avec la raison) si la base plate à supporter dépasse `LIFT_MAX_BASE_AREA` = 25 mm², si elle dépasse la surface de surplomb bas qu'elle corrigerait, ou si L > 5 mm. `raft_lift_auto = False` : `raft_lift` est appliqué tel quel (0 à 5 mm, sans garde-fou). Info `model_lifted` quand L > 0.
+
+Mise en œuvre : `pipeline.generate` calcule le plan, travaille sur une copie du modèle translatée de +L (analyse, contacts, routage, maillage, vérification dans ce repère), puis translate de -L les supports, le raft, l'arbre, les contacts créés, l'analyse et les positions des problèmes. Les contacts fournis (`manual_contacts`, `contacts`) sont déplacés pour le calcul puis restaurés à l'identique. Une analyse réutilisée n'est acceptée que si elle a été calculée avec la même surélévation (`analysis.stats["model_lift"]`).
+
+Exemples (0,2 Normal) : sphère r 5 posée sur un point (`floating_sphere` descendue à z = 0) : L = 1,91 mm, 13 contacts, 27,6 mm³ de supports au lieu de 0,4 mm³ de cônes courts ; colonne 3 x 3 mm avec un bras à 1,8 mm du plateau : L = 1,91 mm, fond de la colonne supporté ; même bras sur une colonne 10 x 10 : refusé (base de 100 mm²) ; cylindre r 4 couché : refusé (bande de contact de 31 mm²) ; figurine (socle de 707 mm², surplombs à 18 mm) : aucun surplomb bas, pas de surélévation. Les deux modèles surélevés se tranchent dans Orca (un seul objet, retour 0).
+
+Limites : la stabilité d'un modèle surélevé (centre de gravité, nombre de pieds) n'est pas évaluée au-delà du critère de base plate ; le seuil de 25 mm² est empirique, non validé par impression ; la surélévation ne s'applique pas au mode `feet` (modèle sur le plateau).
+
+## 4c. Supports creux (`hollow_supports`, désactivé par défaut)
+
+**(a) Creux géométrique** (`build.hollow_cores`) : le long de chaque chaîne de tube, les suites de segments dont le rayon reste >= `hollow_wall` + `line_width` (paroi plus un trou d'au moins 2 lignes) reçoivent un noyau de même axe, de rayon r - `hollow_wall`, raccourci de `hollow_wall` à chaque bout et, sur un pied, commencé au-dessus du disque et de la collerette. Chaque noyau est à au moins `hollow_wall` à l'intérieur de son propre solide, donc de l'union : le vide est fermé (pas de trou en haut, le trancheur fait les parois et un petit pont). Pointes, plots, branches fines, sphères de jonction, pieds, collerettes et raft restent pleins. Le contrôle `support_floating_region` traite le plafond d'un trou fermé de la couche du dessous (<= `VOID_BRIDGE_MAX_AREA` = 4 mm²) comme un pont. `hollow_wall` = 3 largeurs de ligne (0,66 / 1,26 mm) : en buse 0,4 aucun tronc (2,6 mm) n'est assez large, l'option n'a pas d'effet.
+
+**(b) Remplissage faible réglé dans le trancheur** pour l'objet supports : plus efficace et sans géométrie en plus. Dans Orca, une section de tronc (2,4 à 2,8 mm) est presque entièrement en parois et, ce qui reste, plus petit que `minimum_sparse_infill_area` (15 mm² dans le profil A1 mini), est rempli en plein : baisser seulement `wall_loops` et `sparse_infill_density` ne change rien.
+
+Mesures Orca 2.4.2 (supports + raft seuls de la figurine, mode `footprint`, 0,2 Normal, profil A1 mini 0,08 mm) :
+
+| Variante | Volume maillage | Filament | Temps |
+|---|---|---|---|
+| plein, profil (4 parois, 15 %) | 2919 mm³ | 3,86 g | 2 h 15 min 45 s |
+| creux (a), profil | 2500 mm³ | 3,37 g (-13 %) | 2 h 10 min 10 s (-4 %) |
+| plein, `wall_loops` 2 + 10 % | 2919 mm³ | 3,86 g (0 %) | 2 h 16 min 15 s |
+| plein, `wall_loops` 2 + 10 % + `minimum_sparse_infill_area` 0 (b) | 2919 mm³ | 2,67 g (-31 %) | 1 h 43 min 4 s (-24 %) |
+| creux (a) + (b) | 2500 mm³ | 3,04 g | 1 h 59 min 54 s |
+
+Figurine entière avec (a) : 9,56 -> 9,06 g, 3 h 39 -> 3 h 32. (a) et (b) ne se cumulent pas : les parois autour du vide coûtent plus que le remplissage faible qu'elles remplacent. (b) est l'option recommandée ; elle demande que l'export écrive les réglages pour l'objet supports seul, ce qui n'est possible que si le modèle et les supports sont deux objets (raft `feet`, ou modèle et supports en parties distinctes d'un même objet, non implémenté dans `arbor/io/export.py`). Rigidité : le creux (a) garde 96 % du moment quadratique d'un tronc de 2,4 mm (1 - (0,54/1,2)^4) ; `fragile_support` ne tient pas compte du creux. Non validé par impression.
 
 ## 5. Vérification (`verify.py`)
 

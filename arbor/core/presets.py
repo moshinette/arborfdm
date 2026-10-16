@@ -9,7 +9,7 @@ profiles/ folder is read-only once the application is frozen):
 
 File format (same for the stored file and for export / import)::
 
-    {"format": "arborfdm-preset", "version": 1, "label": "My figurines",
+    {"format": "arborfdm-preset", "version": 2, "label": "My figurines",
      "description": "", "inherits": "nozzle_04_normal",
      "values": {"overhang_angle_deg": 50.0}}
 
@@ -32,7 +32,11 @@ from typing import Any, Optional
 from arbor.engine.params import Profile, SupportParams
 
 PRESET_FORMAT = "arborfdm-preset"
-PRESET_VERSION = 1
+PRESET_VERSION = 2
+# Format 1 (before v0.2): built-in profiles had the raft off. A format 1 preset that does
+# not mention the raft keeps it off; one that turned it on keeps the raft under the feet
+# (raft_coverage did not exist).
+LEGACY_V1_VALUES = {"raft_enabled": False}
 USER_PREFIX = "user:"
 ENV_DIR = "ARBOR_USER_PRESET_DIR"
 MAX_FILE_BYTES = 1_000_000
@@ -157,6 +161,10 @@ def parse_preset(data: Any, builtin: dict[str, Profile], source: str = "preset")
         raise PresetError(f"{source}: no 'values' in the file")
     try:
         values = coerce_values(data.get("values"))
+        if version < 2:
+            values = {**LEGACY_V1_VALUES, **values}
+            if values.get("raft_enabled") and "raft_coverage" not in values:
+                values["raft_coverage"] = "feet"
         label = clean_label(data.get("label") or Path(source).stem)
     except PresetError as exc:
         raise PresetError(f"{source}: {exc}") from None

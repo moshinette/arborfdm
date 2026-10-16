@@ -328,3 +328,50 @@ def test_separate_layout_on_engine_output(tmp_path):
         assert check_mesh(pt.mesh).watertight, pt.name
     total = m.volume + res.support_mesh.volume + res.raft_mesh.volume
     assert sum(abs(pt.mesh.volume) for pt in parts) == pytest.approx(total, rel=1e-5)
+
+
+def test_light_slicer_supports_only_on_supports_object(tmp_path):
+    """'Lighter supports' settings go on the supports object only, never on the model."""
+    import xml.etree.ElementTree as ET
+    from arbor.engine import pipeline
+    from arbor.engine.params import load_profiles
+    from tests.models import synthetic as S
+    m = S.shelf()
+    # coverage "feet": the model stands on the plate, so model and supports can be two
+    # objects (with the model on the raft everything is one object, see the test below)
+    p = load_profiles()["nozzle_04_normal"].params.updated(light_slicer_supports=True,
+                                                           raft_coverage="feet")
+    res = pipeline.generate(m, p)
+    path = tmp_path / "light.3mf"
+    er = export_3mf(path, m, res.support_mesh, res.raft_mesh, p, model_name="shelf",
+                    layout="separate")
+    assert any("Lighter supports" in n for n in er.notes)
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("Metadata/model_settings.config"))
+    per_obj = {o.find("metadata[@key='name']").get("value"):
+               {md.get("key"): md.get("value") for md in o.findall("metadata")}
+               for o in root.findall("object")}
+    sup = [v for k, v in per_obj.items() if "supports" in k]
+    mod = [v for k, v in per_obj.items() if "supports" not in k]
+    assert sup and sup[0]["sparse_infill_density"] == "10%" and sup[0]["wall_loops"] == "2"
+    assert mod and "sparse_infill_density" not in mod[0]
+    # off by default: no per-object file at all for a plain export
+    p0 = load_profiles()["nozzle_04_normal"].params
+    export_3mf(tmp_path / "plain.3mf", m, res.support_mesh, res.raft_mesh, p0, layout="separate")
+    with zipfile.ZipFile(tmp_path / "plain.3mf") as z:
+        assert "Metadata/model_settings.config" not in z.namelist()
+
+
+def test_light_supports_reported_when_model_rests_on_raft(tmp_path):
+    """Model on the raft (default coverage): one object, so the lighter-supports settings
+    cannot be applied; the export says so instead of ignoring them silently."""
+    from arbor.engine import pipeline
+    from arbor.engine.params import load_profiles
+    from tests.models import synthetic as S
+    m = S.shelf()
+    p = load_profiles()["nozzle_04_normal"].params.updated(light_slicer_supports=True)
+    assert p.raft_enabled and p.raft_coverage == "footprint"
+    res = pipeline.generate(m, p)
+    er = export_3mf(tmp_path / "one.3mf", m, res.support_mesh, res.raft_mesh, p,
+                    model_name="shelf", layout="separate")
+    assert any("Lighter supports not applied" in n for n in er.notes), er.notes

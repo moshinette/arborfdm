@@ -17,6 +17,25 @@
 | Édition des contacts : Suppr, Échap, suppressions groupées par raison, carte d'information au survol | interface, `project.py` |
 | Raft fin d'une seule pièce, pieds proportionnels à la hauteur, entretoises plus épaisses | moteur, profils |
 
+## Itération 0.3 (raft, couches, orientation, supports creux)
+
+Chiffres : mesures avec OrcaSlicer 2.4.2 en ligne de commande (figurine 0,2 Normal), détaillées dans `docs/ALGORITHM.md` sections 4b et 4c. Aucune impression faite avec cette itération à ce jour. Tests : voir `docs/TEST_REPORT.md`. Suite : `docs/STATUS.md`.
+
+| Fonction | Valeur | Complexité | Risques / dépendances | Tests | État réel |
+|---|---|---|---|---|---|
+| Raft `footprint` par défaut (`raft_coverage`) : une plaque sous la base et les pieds | haute : base plus solide sans surcoût (9,56 g contre 9,58 g en `feet`) | moyenne | modèle posé sur le raft : export « separate » en un seul objet ; retrait à valider | voir `docs/TEST_REPORT.md` | Partiel : mesuré au trancheur, impression à faire |
+| Jeu de décollement `raft_release_gap` (une couche par défaut, 0 = soudé) | moyenne : retrait du modèle sans outil | faible | sans jeu, la base est soudée au raft | voir `docs/TEST_REPORT.md` | Partiel : G-code vérifié, impression à faire |
+| Mode `bed` (rectangle englobant, jamais le plateau entier) | faible : plus de matière (9,73 g), pas de meilleure tenue | faible | non retenu par défaut | voir `docs/TEST_REPORT.md` | Fait (option), non recommandé |
+| Surélévation automatique (`raft_lift_auto`) et manuelle (`raft_lift`, 0 à 5 mm) au-dessus du raft | haute pour sphères, bras et colonnes posés sur un point | élevée | stabilité évaluée seulement par la base plate (25 mm²), seuil empirique ; sans effet en `feet` | voir `docs/TEST_REPORT.md` | Partiel : cas synthétiques mesurés, aucune impression |
+| Avertissement explicite à l'export quand les réglages par objet ne s'appliquent pas | moyenne : évite des réglages ignorés en silence | faible | aucune | voir `docs/TEST_REPORT.md` | Fait |
+| Molette sur le curseur « Cut » (1 couche, Maj : 10 couches) | moyenne | faible | reconstruction 3D limitée à 60 ms | voir `docs/TEST_REPORT.md` | Fait ; à essayer sur Windows |
+| Pourcentage de surface en surplomb par orientation, pastille verte / orange / rouge | haute : comparer les orientations d'un coup d'œil | faible | seuils relatifs et absolus empiriques ; indication, pas garantie | voir `docs/TEST_REPORT.md` | Fait |
+| Libellés et infobulles de tous les nouveaux paramètres (onglet Advanced) | moyenne | faible | aucune | voir `docs/TEST_REPORT.md` | Fait ; à vérifier sur Windows |
+| Supports creux géométriques (`hollow_supports`, désactivé par défaut) | moyenne : -13 % de filament et -4 % de temps sur les supports | moyenne | rigidité non vérifiée (`fragile_support` ignore le vide) ; sans effet en buse 0,4 | voir `docs/TEST_REPORT.md` | Partiel : mesuré au trancheur, impression à faire |
+| Supports allégés dans le trancheur (`light_slicer_supports`, désactivé par défaut) | haute : -31 % de filament et -24 % de temps sur les supports | moyenne | exige raft `feet` ou sans raft ; impossible par objet quand le modèle repose sur le raft | voir `docs/TEST_REPORT.md` | Partiel : mesuré, impression à faire |
+
+Les deux options de supports ne s'additionnent pas (les parois autour du vide coûtent plus que le remplissage faible qu'elles remplacent). Aucune des deux n'est validée par impression.
+
 ## Priorité 1 : prochaines étapes recommandées
 
 | Idée | Valeur | Coût | Risque | Notes |
@@ -48,5 +67,5 @@
 
 ## Ce qui n'est volontairement pas prévu
 
-- Support en cube, supports creux : peu de retours, et l'idée du cube entre en conflit avec le raft d'une pièce.
+- Support en cube : peu de retours, et l'idée entre en conflit avec le raft d'une pièce.
 - Effets visuels supplémentaires dans l'interface : priorité à la lisibilité.

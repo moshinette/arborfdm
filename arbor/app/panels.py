@@ -8,13 +8,37 @@ from typing import Any, Callable, Optional
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from arbor.core.orientation import overhang_level
 from arbor.core.presets import is_user_key
 from arbor.core.project import Project
 from arbor.engine.params import SupportParams
 
 from . import icons, theme
 
+OVERHANG_LEVEL_COLORS = {"good": theme.OK, "medium": theme.WARNING, "bad": theme.ERROR}
+OVERHANG_TIP = ("Overhang surface = area of the faces tilted beyond the engine's effective "
+                "overhang angle (faces on the plate excluded) / total mesh area, on the "
+                "rotated mesh.\nColour: position between the best (green, lower third) and "
+                "the worst (red, upper third) candidate, because the share of overhang depends "
+                "on the model.\nAbsolute guards: <= 5 % always green, >= 40 % always red; "
+                "if all candidates are within 5 points, absolute thresholds: < 10 % green, "
+                "< 25 % orange, else red.")
+
+
+def _dot_icon(color: str, size: int = 12) -> QtGui.QIcon:
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtCore.Qt.transparent)
+    pt = QtGui.QPainter(pm)
+    pt.setRenderHint(QtGui.QPainter.Antialiasing)
+    pt.setBrush(QtGui.QColor(color))
+    pt.setPen(QtCore.Qt.NoPen)
+    pt.drawEllipse(1, 1, size - 2, size - 2)
+    pt.end()
+    return QtGui.QIcon(pm)
+
 # name: (group, label, min, max, step, decimals, unit, tooltip)
+STR_CHOICES = {"tip_shape": ["cone", "ball"], "raft_coverage": ["feet", "footprint", "bed"]}
+
 PARAM_META: dict[str, tuple] = {
     "nozzle_diameter": ("Printer", "Nozzle diameter", 0.1, 1.2, 0.05, 2, "mm", "Printer nozzle"),
     "line_width": ("Printer", "Line width", 0.1, 1.5, 0.01, 2, "mm", "Extrusion width"),
@@ -45,6 +69,36 @@ PARAM_META: dict[str, tuple] = {
     "tip_penetration": ("Tips", "Penetration", 0.0, 1, 0.01, 3, "mm",
                         "Controlled penetration into the model"),
     "tip_shape": ("Tips", "Tip shape", None, None, None, None, "", "cone or ball"),
+    "raft_coverage": ("Raft", "Raft coverage", None, None, None, None, "",
+                      "footprint (default): one plate under the model and the feet, the model "
+                      "rests on it; feet: under the support feet only, the model stands on the "
+                      "plate; bed: bounding rectangle of the model and the feet (not the whole "
+                      "printer bed)"),
+    "raft_lift_auto": ("Raft", "Auto lift above raft", None, None, None, None, "",
+                       "Raise the model just enough to fit a full tip under overhangs that are "
+                       "too close to the raft (refused when it would make things worse)"),
+    "raft_lift": ("Raft", "Manual lift", 0.0, 5.0, 0.05, 2, "mm",
+                  "Lift used when auto lift is off (0 = model on the raft)"),
+    "raft_release_gap": ("Raft", "Release gap", 0.0, 0.5, 0.01, 3, "mm",
+                         "Gap between raft top and model bottom so the raft peels off "
+                         "(about one layer; 0 = welded)"),
+    "hollow_supports": ("Branches / trunks", "Hollow supports", None, None, None, None, "",
+                        "Wide trunk sections get a sealed inner void (tips, thin branches, feet "
+                        "and raft stay solid). Not validated by print"),
+    "hollow_wall": ("Branches / trunks", "Hollow wall", 0.2, 5, 0.01, 2, "mm",
+                    "Wall thickness of hollow sections (at least 2 line widths)"),
+    "island_anchor_height": ("Contacts", "Island anchor height", 0.0, 5, 0.1, 2, "mm",
+                             "Islands that start in a point (hand, ball) get a ring of thicker "
+                             "contacts; 0 disables"),
+    "island_anchor_spacing": ("Contacts", "Island anchor radius", 0.2, 5, 0.05, 2, "mm",
+                              "Radius of the anchor ring around the lowest point"),
+    "island_tip_diameter": ("Tips", "Island tip diameter", 0.05, 3, 0.01, 3, "mm",
+                            "Tip diameter of island anchor contacts"),
+    "light_slicer_supports": ("Raft", "Lighter supports in slicer", None, None, None, None, "",
+                              "Separate-objects 3MF only, raft coverage 'feet' or no raft: "
+                              "2 walls, 10 % infill on the supports object in OrcaSlicer / "
+                              "Bambu Studio (about -31 % material on supports, measured with "
+                              "Orca CLI, not validated by print)"),
     "z_gap": ("Tips", "Z gap", 0.0, 2, 0.01, 3, "mm", "Extra vertical clearance"),
     "xy_clearance": ("Tips", "XY clearance", 0.0, 10, 0.05, 2, "mm",
                      "Min horizontal clearance of branches from the model"),
@@ -148,7 +202,7 @@ class ParamField(QtCore.QObject):
             w.toggled.connect(lambda v: self.edited.emit(self.name, bool(v)))
         elif isinstance(default, str):
             w = QtWidgets.QComboBox(parent)
-            w.addItems(["cone", "ball"])
+            w.addItems(STR_CHOICES.get(name, [default]))
             w.currentTextChanged.connect(lambda v: self.edited.emit(self.name, v))
         elif isinstance(default, int):
             w = QtWidgets.QSpinBox(parent)
@@ -578,16 +632,26 @@ class LeftPanel(QtWidgets.QWidget):
     def show_candidates(self, candidates: list) -> None:
         self.candidates = list(candidates)
         self.orient_list.clear()
+        pcts = [c.criteria["overhang_surface_pct"] for c in self.candidates
+                if "overhang_surface_pct" in (getattr(c, "criteria", None) or {})]
         for i, c in enumerate(self.candidates):
             crit = getattr(c, "criteria", {}) or {}
             rx, ry, rz = c.rotation_deg
             parts = [f"#{i + 1}  {rx:.0f}\u00b0 / {ry:.0f}\u00b0 / {rz:.0f}\u00b0"]
-            if "overhang_area" in crit:
-                parts.append(f"overhang {crit['overhang_area']:.0f} mm\u00b2")
+            level = None
+            if "overhang_surface_pct" in crit:
+                parts.append(f"overhang surface {crit['overhang_surface_pct']:.1f} % "
+                             f"({crit['overhang_surface_area']:.0f} mm\u00b2)")
+                level = overhang_level(crit["overhang_surface_pct"], pcts)
             if "height" in crit:
                 parts.append(f"h {crit['height']:.1f} mm")
             item = QtWidgets.QListWidgetItem("  \u00b7  ".join(parts))
             tip = c.describe() if hasattr(c, "describe") else str(crit)
+            if level is not None:
+                col = OVERHANG_LEVEL_COLORS[level]
+                item.setIcon(_dot_icon(col))
+                item.setData(QtCore.Qt.UserRole, level)
+                tip += "\n\n" + OVERHANG_TIP
             item.setToolTip(tip)
             self.orient_list.addItem(item)
         self.orient_list.setVisible(bool(self.candidates))

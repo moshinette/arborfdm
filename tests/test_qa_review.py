@@ -139,7 +139,8 @@ def test_rotated_and_scaled_figurine(figurine):
     assert m.extents[2] == pytest.approx(29.07, abs=0.05)
     r = pipeline.generate(m, NORMAL)
     assert r.errors == [], [i.message for i in r.errors]
-    assert r.support_mesh.bounds[0, 2] >= -1e-6
+    # not below the support base (raft top, below z = 0 under the model since v0.2)
+    assert r.support_mesh.bounds[0, 2] >= r.tree.z_base - 1e-6
     routed = _routed(r)
     P = np.array([c.position for c in r.contacts if c.id in routed])
     _, d, _ = trimesh.proximity.closest_point(r.support_mesh, P)
@@ -149,7 +150,9 @@ def test_rotated_and_scaled_figurine(figurine):
 def test_raft_supports_stand_on_raft_and_avoid_model(figurine):
     from arbor.engine.build import raft_polygon, trimesh_to_manifold
     from shapely.geometry import Point
-    p = NORMAL.updated(raft_enabled=True)
+    # raft under the feet only (raft_coverage "feet", the v0.1 raft): the model stays on
+    # the plate; the default "footprint" raft is tested in tests/test_raft_lift.py
+    p = NORMAL.updated(raft_enabled=True, raft_coverage="feet")
     r = pipeline.generate(figurine, p)
     assert r.raft_mesh is not None and r.raft_mesh.is_watertight
     assert r.raft_mesh.bounds[:, 2] == pytest.approx([0.0, p.raft_thickness], abs=1e-6)
@@ -222,7 +225,8 @@ def test_extreme_valid_params_on_small_models(over):
         r = pipeline.generate(load_mesh(EX / f"{name}.stl").mesh, p)
         sm = r.support_mesh
         if sm is not None and len(sm.faces):
-            assert sm.is_watertight and sm.bounds[0, 2] >= -1e-6
+            # not below the support base (raft top, below z = 0 under the model since v0.2)
+            assert sm.is_watertight and sm.bounds[0, 2] >= r.tree.z_base - 1e-6
 
 
 def test_min_contact_spacing_bounded_memory():
@@ -616,8 +620,17 @@ def test_gui_full_flow_real_picking_and_exports(qapp, win, tmp_path):
         assert outs[name].exists(), w.last_error
     assert validate_export(outs["g.3mf"]) == []
     parts = {g.metadata.get("name"): g for g in trimesh.load(outs["g.3mf"]).dump(concatenate=False)}
-    sup = parts[f"{p.name.rsplit('.', 1)[0]} supports"]
-    off = sup.bounds[0] - p.result.support_mesh.bounds[0]
+    base = p.name.rsplit('.', 1)[0]
+    if f"{base} supports" in parts:
+        sup = parts[f"{base} supports"]
+        off = sup.bounds[0] - p.result.support_mesh.bounds[0]
+    else:
+        # v0.2 default raft under the model: the model rests on the raft, the separate
+        # layout writes one object (a model object not touching the plate would be
+        # dropped onto it by the slicer)
+        sup = parts[f"{base} with supports"]
+        ref = [m for m in (p.mesh, p.result.support_mesh, p.result.raft_mesh) if m is not None]
+        off = sup.bounds[0] - np.min([m.bounds[0] for m in ref], axis=0)
     assert trimesh.proximity.closest_point(sup, [c.position + off])[1][0] < 0.1   # manual tip exported
     s = trimesh.load(outs["g_sup.stl"])
     a = trimesh.load(outs["g_all.stl"])
@@ -672,7 +685,8 @@ def test_gui_every_control_has_an_effect(qapp, win, tmp_path):
         if isinstance(wd, QtWidgets.QCheckBox):
             wd.setChecked(not wd.isChecked())
         elif isinstance(wd, QtWidgets.QComboBox):
-            wd.setCurrentText("ball" if wd.currentText() == "cone" else "cone")
+            # any choice list (tip_shape, raft_coverage since v0.2): next item
+            wd.setCurrentIndex((wd.currentIndex() + 1) % wd.count())
         else:
             v, s = wd.value(), wd.singleStep()
             wd.setValue(v + s if v + s <= wd.maximum() else v - s)
@@ -777,7 +791,9 @@ def test_two_identical_minis_produce_identical_issue_messages(figurine):
     one plate only produced identical messages by chance, and any change of the contact
     spacing (v0.2, effective tip spacing) changes that chance. The precondition is built
     from the issues of one figurine, placed twice."""
-    r = pipeline.generate(figurine, NORMAL)
+    # without a raft (on by default since v0.2): with one, tall trees give the info
+    # tall_tree_on_raft instead of unstable_trunk
+    r = pipeline.generate(figurine, NORMAL.updated(raft_enabled=False))
     issues = [i for i in r.issues if i.code == "unstable_trunk"]
     assert issues
     doubled = issues + [Issue(i.severity, i.code, i.message,

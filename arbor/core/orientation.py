@@ -41,6 +41,15 @@ with V_ref = volume of the cube whose diagonal is L_ref (rotation invariant), A_
 The weights are heuristic defaults (no print data yet) and are exposed in ``weights``.
 Overlapping shells are not united first: their internal faces are counted (run
 repair_mesh(union_shells=True) before if needed). Self-shadowing is ignored.
+Reported metric (not part of the cost, does not change the ranking)
+-------------------------------------------------------------------
+``overhang_surface_area`` (mm^2) and ``overhang_surface_pct`` (%): area of the faces whose
+downward tilt exceeds the engine's EFFECTIVE overhang angle (engine.analysis
+.effective_overhang_angle_deg: step per layer capped at one line width), faces resting on
+the plate (all vertices below one layer height) excluded, divided by the total area of the
+mesh. Computed on every face of the rotated mesh (no sampling), identical for all
+candidates. Same mask as analysis._face_analysis (-n_z > sin(angle) and not on plate).
+
 Miniature specific concerns (faces, detail side) are NOT modelled: the user chooses.
 """
 from __future__ import annotations
@@ -64,6 +73,48 @@ DEFAULT_WEIGHTS = {
 }
 MAX_FACES = 300_000
 
+# Colour levels of the reported overhang surface (%), see overhang_level().
+LEVEL_ABS_GOOD = 5.0       # <= 5 %: always "good" (nothing worth worrying about)
+LEVEL_ABS_BAD = 40.0       # >= 40 %: always "bad"
+LEVEL_FLAT_SPREAD = 5.0    # best-to-worst spread below this (points): relative ranking is noise
+LEVEL_FLAT_GOOD = 10.0     # absolute thresholds used then: < 10 % good, < 25 % medium, else bad
+LEVEL_FLAT_BAD = 25.0
+
+
+def overhang_surface(mesh: trimesh.Trimesh, rot: np.ndarray, angle_deg: float,
+                     layer_height: float) -> tuple[float, float]:
+    """(overhang surface area in mm^2, total area in mm^2) of ``mesh`` rotated by ``rot``
+    and placed on the plate. Same criterion as the engine's overhang face mask."""
+    v = np.asarray(mesh.vertices, float)
+    f = np.asarray(mesh.faces)
+    r = rot[:3, :3]
+    z = v @ r[2]
+    z = z - z.min()
+    nz = np.asarray(mesh.face_normals, float) @ r[2]
+    areas = np.asarray(mesh.area_faces, float)
+    mask = (-nz > np.sin(np.radians(angle_deg))) & ~(z[f].max(axis=1) < layer_height)
+    return float(areas[mask].sum()), float(areas.sum())
+
+
+def overhang_level(pct: float, all_pcts) -> str:
+    """"good" / "medium" / "bad" for an overhang surface of ``pct`` % among the candidates
+    ``all_pcts``. Relative first: the share of overhang depends on the model (a figurine
+    with arms never gets near 0), so the colour follows the position between the best and
+    the worst candidate (lower third good, middle third medium, upper third bad). Absolute
+    guards keep it honest: <= 5 % is always good, >= 40 % always bad. When all candidates
+    are within 5 points of each other, the ranking is not meaningful and absolute
+    thresholds apply (< 10 % good, < 25 % medium, else bad)."""
+    if pct <= LEVEL_ABS_GOOD:
+        return "good"
+    if pct >= LEVEL_ABS_BAD:
+        return "bad"
+    lo, hi = min(all_pcts), max(all_pcts)
+    if hi - lo < LEVEL_FLAT_SPREAD:
+        return "good" if pct < LEVEL_FLAT_GOOD else "medium" if pct < LEVEL_FLAT_BAD else "bad"
+    t = (pct - lo) / (hi - lo)
+    return "good" if t < 1 / 3 else "medium" if t < 2 / 3 else "bad"
+
+
 
 @dataclass
 class OrientationCandidate:
@@ -79,7 +130,9 @@ class OrientationCandidate:
         c = self.criteria
         return (f"{self.label}: cost {self.cost:.3f} | overhang {c['overhang_area']:.0f} mm2, "
                 f"support ~{c['support_volume']:.0f} mm3, height {c['height']:.1f} mm, "
-                f"footprint {c['footprint']:.0f} mm2, stability {c['stability']:.2f}")
+                f"footprint {c['footprint']:.0f} mm2, stability {c['stability']:.2f}"
+                + (f", overhang surface {c['overhang_surface_pct']:.1f} % "
+                   f"({c['overhang_surface_area']:.0f} mm2)" if "overhang_surface_pct" in c else ""))
 
 
 def _sample_faces(mesh: trimesh.Trimesh, max_faces: int, seed: int = 0):
@@ -188,8 +241,12 @@ def cost_terms(c: dict[str, float], v_ref: float, a_total: float, l_ref: float,
 
 def suggest_orientations(mesh: trimesh.Trimesh, overhang_angle_deg: float = 55.0, n: int = 6,
                          weights: Optional[dict[str, float]] = None,
-                         max_faces: int = MAX_FACES) -> list[OrientationCandidate]:
-    """Return up to ``n`` candidate orientations sorted by increasing cost."""
+                         max_faces: int = MAX_FACES, effective_angle_deg: Optional[float] = None,
+                         layer_height: float = 0.2) -> list[OrientationCandidate]:
+    """Return up to ``n`` candidate orientations sorted by increasing cost.
+    ``effective_angle_deg`` (default: overhang_angle_deg) and ``layer_height`` define the
+    reported overhang surface metric only (see module doc)."""
+    eff = overhang_angle_deg if effective_angle_deg is None else effective_angle_deg
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
     if len(mesh.faces) == 0:
         return []
@@ -212,6 +269,9 @@ def suggest_orientations(mesh: trimesh.Trimesh, overhang_angle_deg: float = 55.0
         rot = rotation_aligning(d, [0, 0, -1])
         c = evaluate_orientation(tri, area_scale, rot, overhang_angle_deg, centroid=centroid)
         terms = cost_terms(c, v_ref, a_total, l_ref, w)
+        s_area, s_total = overhang_surface(mesh, rot, eff, layer_height)
+        c["overhang_surface_area"] = s_area
+        c["overhang_surface_pct"] = 100.0 * s_area / max(s_total, 1e-300)
         moved = verts @ rot[:3, :3].T
         lo, hi = moved.min(0), moved.max(0)
         place = np.eye(4)

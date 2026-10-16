@@ -46,12 +46,13 @@ def test_missing_folder_is_empty_not_an_error(store):
 
 def test_save_stores_inheritance_and_only_changed_values(store, builtin):
     base = builtin["nozzle_04_normal"].params
-    params = base.updated(overhang_angle_deg=48.0, raft_enabled=True)
+    # raft on by default since v0.2: turning it off is the changed value
+    params = base.updated(overhang_angle_deg=48.0, raft_enabled=False)
     p = store.save("Mini 28mm", params, "nozzle_04_normal")
     data = json.loads(p.path.read_text(encoding="utf-8"))
     assert data["format"] == "arborfdm-preset"
     assert data["inherits"] == "nozzle_04_normal"
-    assert data["values"] == {"overhang_angle_deg": 48.0, "raft_enabled": True}
+    assert data["values"] == {"overhang_angle_deg": 48.0, "raft_enabled": False}
     assert p.key == "user:mini_28mm" and p.params == params
     # reload from disk gives the same parameters
     again = PresetStore(builtin, store.directory)
@@ -219,3 +220,17 @@ def test_unwritable_folder_gives_clear_error(builtin, tmp_path):
             s.save("X", builtin["nozzle_04_normal"].params, "nozzle_04_normal")
     finally:
         d.chmod(0o700)
+
+
+def test_format1_preset_keeps_its_raft(builtin, tmp_path):
+    """Format 1 presets were diffs against profiles with the raft off (v0.1)."""
+    from arbor.core.presets import parse_preset
+    off = parse_preset({"version": 1, "label": "a", "inherits": "nozzle_02_normal",
+                        "values": {"overhang_angle_deg": 50.0}}, builtin)
+    assert off["params"].raft_enabled is False
+    on = parse_preset({"version": 1, "label": "b", "inherits": "nozzle_02_normal",
+                       "values": {"raft_enabled": True}}, builtin)
+    assert on["params"].raft_enabled and on["params"].raft_coverage == "feet"
+    new = parse_preset({"version": 2, "label": "c", "inherits": "nozzle_02_normal",
+                        "values": {}}, builtin)
+    assert new["params"].raft_enabled and new["params"].raft_coverage == "footprint"

@@ -493,7 +493,7 @@ def test_cut_is_reset_when_another_model_is_loaded(app, window, stl_path):
     assert window.viewport.clip_z is None
 
 
-def test_cut_is_reset_when_another_model_is_loaded(app, window, stl_path):
+def test_cut_is_reset_when_another_model_is_loaded_v2(app, window, stl_path):
     """A cut left active on the previous model must not slice the next one open."""
     window.open_path(stl_path)
     wait_for(app, window)
@@ -632,7 +632,8 @@ def test_save_rename_export_delete_preset(app, window, stl_path, tmp_path):
     assert combo.count() == 6                      # no user preset yet: no separator
     assert not window.act_preset_delete.isEnabled()
     window.right.fields["overhang_angle_deg"].widget.setValue(48.0)
-    window.left.fields["raft_enabled"].widget.setChecked(True)
+    # raft on by default since v0.2: turning it off is the changed value
+    window.left.fields["raft_enabled"].widget.setChecked(False)
     window.text_provider = lambda cap, label, default: "My minis"
     assert window.save_preset()
     key = "user:my_minis"
@@ -643,7 +644,7 @@ def test_save_rename_export_delete_preset(app, window, stl_path, tmp_path):
     assert header.text() == "My presets" and not (header.flags() & QtCore.Qt.ItemIsEnabled)
     data = json.loads((tmp_path / "user_presets" / "my_minis.json").read_text("utf-8"))
     assert data["inherits"] == "nozzle_04_normal"
-    assert data["values"] == {"overhang_angle_deg": 48.0, "raft_enabled": True}
+    assert data["values"] == {"overhang_angle_deg": 48.0, "raft_enabled": False}
     assert window.act_preset_delete.isEnabled() and "Preset:" in window.right.profile_label.text()
     # rename keeps the selection and the values
     window.text_provider = lambda cap, label, default: "Minis 32mm"
@@ -669,7 +670,7 @@ def test_save_rename_export_delete_preset(app, window, stl_path, tmp_path):
     # import the exported file back
     window.path_provider = lambda save, cap, filt, default: str(out)
     assert window.import_preset()
-    assert p.profile_key == "user:minis_32mm" and p.params.raft_enabled
+    assert p.profile_key == "user:minis_32mm" and not p.params.raft_enabled
 
 
 def test_import_invalid_preset_reports_without_crash(app, window, tmp_path):
@@ -725,6 +726,9 @@ def test_export_3mf_separate_objects(app, window, tmp_path):
     window.open_path(os.path.join(EXAMPLES, "shelf.stl"))
     wait_for(app, window)
     assert not window.act_export_3mf_sep.isEnabled()          # needs generated supports
+    # two objects need the model on the plate: raft under the feet only (with the v0.2
+    # default raft under the model, the separate layout writes one object)
+    window.project.set_param("raft_coverage", "feet")
     window.generate_full()
     wait_for(app, window, timeout=300)
     assert window.act_export_3mf_sep.isEnabled()
@@ -1102,3 +1106,82 @@ def test_busy_card_and_empty_state(app, window, monkeypatch, stl_path):
     card.cancel_button.click()
     wait_for(app, window, timeout=30)
     assert window.status_msg.text() == "Cancelled" and not card.isVisibleTo(window)
+
+
+# ---------------------------------------------------------------------------
+# Cut slider: one layer per wheel notch; orientation list shows the overhang surface
+# ---------------------------------------------------------------------------
+def _wheel(widget, delta, mods=QtCore.Qt.NoModifier):
+    from PySide6 import QtGui
+    pos = QtCore.QPointF(widget.width() / 2, widget.height() / 2)
+    ev = QtGui.QWheelEvent(pos, widget.mapToGlobal(pos), QtCore.QPoint(0, 0),
+                           QtCore.QPoint(0, delta), QtCore.Qt.NoButton, mods,
+                           QtCore.Qt.NoScrollPhase, False)
+    QtWidgets.QApplication.sendEvent(widget, ev)
+
+
+def test_cut_wheel_steps_one_layer_and_bounds(app, window, stl_path):
+    assert window.open_path(str(stl_path))
+    wait_for(app, window)
+    app.processEvents()
+    v = window.view
+    lh = window.project.params.layer_height
+    n_max = v.layer_count()
+    assert n_max == int(np.ceil(window.viewport.scene_height() / lh - 1e-6)) > 20
+    assert v.clip_label.text() == "all"
+    _wheel(v.clip_slider, 120)                       # up at the top: stays "all"
+    assert v.clip_label.text() == "all" and window.viewport.clip_z is None
+    _wheel(v.clip_slider, -120)                      # down: last layer below the top
+    assert v.current_layer() == n_max - 1
+    assert v.clip_label.text() == f"L {n_max - 1} · {(n_max - 1) * lh:.2f} mm"
+    assert window.viewport.clip_z == pytest.approx((n_max - 1) * lh)
+    _wheel(v.clip_slider, -120, QtCore.Qt.ShiftModifier)          # Shift: 10 layers
+    assert v.current_layer() == n_max - 11
+    _wheel(v.clip_slider, 120)
+    assert v.current_layer() == n_max - 10
+    for _ in range(3):
+        _wheel(v.clip_slider, -120, QtCore.Qt.ShiftModifier)
+    assert v.current_layer() >= 1
+    _wheel(v.clip_slider, -120 * 20, QtCore.Qt.ShiftModifier)      # far below: clamps at L 1
+    assert v.current_layer() == 1 and v.clip_label.text().startswith("L 1 ")
+    _wheel(v.clip_slider, 120 * 20, QtCore.Qt.ShiftModifier)      # far above: back to all
+    assert v.clip_label.text() == "all" and window.viewport.clip_z is None
+    assert v.clip_slider.value() == 1000
+
+
+def test_cut_wheel_burst_rebuilds_once(app, window, stl_path):
+    assert window.open_path(str(stl_path))
+    wait_for(app, window)
+    app.processEvents()
+    vp, v = window.viewport, window.view
+    calls = []
+    orig = vp._rebuild_geometry
+    vp._rebuild_geometry = lambda: (calls.append(1), orig())[1]
+    vp._clip_timer.timeout.disconnect()
+    vp._clip_timer.timeout.connect(vp._rebuild_geometry)
+    for _ in range(8):
+        _wheel(v.clip_slider, -120)
+    assert not calls                                  # nothing rebuilt per notch
+    end = time.monotonic() + 1.0
+    while time.monotonic() < end and not calls:
+        app.processEvents()
+        time.sleep(0.01)
+    assert len(calls) == 1
+
+
+def test_orientation_list_shows_overhang_surface_and_colour(app, window):
+    from types import SimpleNamespace
+    from arbor.app.panels import OVERHANG_LEVEL_COLORS
+
+    def cand(pct):
+        return SimpleNamespace(rotation_deg=(0, 0, 0), criteria={
+            "overhang_area": 1.0, "height": 10.0, "overhang_surface_pct": pct,
+            "overhang_surface_area": pct * 10}, describe=lambda: "x")
+    window.left.show_candidates([cand(8.0), cand(22.0), cand(41.0)])
+    lst = window.left.orient_list
+    texts = [lst.item(i).text() for i in range(3)]
+    assert "overhang surface 8.0 % (80 mm²)" in texts[0]
+    levels = [lst.item(i).data(QtCore.Qt.UserRole) for i in range(3)]
+    assert levels == ["good", "medium", "bad"]
+    assert not lst.item(0).icon().isNull()
+    assert "Colour" in lst.item(0).toolTip() and set(OVERHANG_LEVEL_COLORS) == set(levels)

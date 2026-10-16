@@ -150,7 +150,10 @@ def test_generic_result_properties(name):
     assert not is_empty_mesh(sm), f"{name}: contacts but empty support mesh"
     assert sm.is_watertight, f"{name}: support mesh not watertight"
     assert sm.volume > 0
-    assert sm.bounds[0, 2] >= -1e-3, f"{name}: support below plate (min z {sm.bounds[0, 2]})"
+    # not below the support base (plate, or raft top: below z = 0 when the model rests
+    # on the raft, v0.2 default)
+    zb = res.tree.z_base
+    assert sm.bounds[0, 2] >= zb - 1e-3, f"{name}: support below its base (min z {sm.bounds[0, 2]} < {zb})"
 
     # every component grounded
     bad = grounded_components(res)
@@ -524,11 +527,15 @@ def test_export_3mf_roundtrip(tmp_path):
     assert len(geoms) >= 2, "model and supports must be separate objects in the 3MF"
     for g in geoms:
         assert g.is_watertight
-    expected = m.volume + res.support_mesh.volume
+    # v0.2: raft on by default, the model rests on it (raft below z = 0, the export
+    # shifts the scene up by the raft thickness)
+    raft_v = res.raft_mesh.volume if res.raft_mesh is not None else 0.0
+    expected = m.volume + res.support_mesh.volume + raft_v
     assert sum(g.volume for g in geoms) == pytest.approx(expected, rel=1e-3)
     allb = np.vstack([g.bounds for g in geoms])
+    lo = min(float(x.bounds[0, 2]) for x in (m, res.support_mesh, res.raft_mesh) if x is not None)
     assert allb[:, 2].min() == pytest.approx(0.0, abs=1e-3)
-    assert allb[:, 2].max() == pytest.approx(m.bounds[1, 2], abs=1e-3)
+    assert allb[:, 2].max() == pytest.approx(m.bounds[1, 2] - lo, abs=1e-3)
 
 
 def test_export_stl_roundtrip(tmp_path):
