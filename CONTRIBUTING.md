@@ -6,7 +6,7 @@ The most useful contributions right now are **real print results**: which profil
 
 ## Development setup
 
-Python 3.10.1 to 3.14, 64-bit (3.12 recommended). Python 3.15+ is not supported yet because `manifold3d` has no wheel for it; Python 3.10.0 crashes PyInstaller.
+Python 3.12 to 3.14, 64-bit (3.12 recommended). Python 3.15+ is not supported yet because `manifold3d` has no wheel for it; Python 3.10 and 3.11 crash in the GUI (PySide6 6.12 reference-count bug, "deallocating None").
 
 ```
 git clone <repository URL> arborfdm
@@ -37,7 +37,7 @@ The full suite takes about 6 minutes on 2 cores. CI (`.github/workflows/tests.ym
 
 - `arbor/engine/` and `arbor/core/` never import Qt: the engine must stay usable from the CLI and tests. GUI code lives in `arbor/app/`.
 - Units are millimetres, Z up, build plate at z = 0.
-- Python 3.10 syntax (`from __future__ import annotations`, type hints), PEP 8, lines up to about 100 characters. Keep functions small and name things after the geometry they handle.
+- Python 3.12 syntax (`from __future__ import annotations`, type hints), PEP 8, lines up to about 100 characters. Keep functions small and name things after the geometry they handle.
 - No new runtime dependency without discussing it in an issue first (it ends up in the Windows build and in `docs/LICENSES.md`). Only licenses compatible with the GPL v3 (permissive, LGPL dynamically linked, GPL v3).
 - Keep docs in sync: `docs/` for behaviour, `CHANGELOG.md` under "Unreleased" for anything user-visible.
 

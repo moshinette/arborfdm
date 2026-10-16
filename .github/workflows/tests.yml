@@ -24,9 +24,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python: ["3.12"]
         include:
-          # oldest and newest supported Python, Linux only to keep CI time reasonable
+          # other supported Python versions, Linux only to keep CI time reasonable
           - os: ubuntu-latest
-            python: "3.10"
+            python: "3.13"
           - os: ubuntu-latest
             python: "3.14"
     env:

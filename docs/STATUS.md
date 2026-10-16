@@ -32,7 +32,7 @@ Dernière mise à jour : 2026-10-16.
 
 - Tests, depuis la racine du dépôt : `QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider` (CI : `.github/workflows/tests.yml`).
 - Lancement en développement : `scripts/run_dev.sh` (Linux) ou `scripts/run_dev.bat` (Windows).
-- Build Windows : `scripts\build_windows.bat` (Python 3.10.1 à 3.14, 64 bits, 3.12 recommandé ; voir `docs/PACKAGING.md`).
+- Build Windows : `scripts\build_windows.bat` (Python 3.12 à 3.14, 64 bits, 3.12 recommandé ; voir `docs/PACKAGING.md`).
 
 ## Mesures
 

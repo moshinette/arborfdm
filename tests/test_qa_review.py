@@ -12,7 +12,10 @@ import copy
 import json
 import os
 import re
-import resource
+try:
+    import resource  # POSIX only
+except ImportError:  # Windows
+    resource = None
 import subprocess
 import sys
 import textwrap
@@ -85,6 +88,8 @@ def arm_result():
 def _run_limited(code: str, mem_gb: float, timeout: float = 600):
     """Run python code in a subprocess with an address space limit; returns
     (returncode, stdout, stderr, wall seconds, peak RSS MB)."""
+    if resource is None:
+        pytest.skip("memory limit needs the POSIX resource module")
     lim = int(mem_gb * 1024 ** 3)
 
     def pre():

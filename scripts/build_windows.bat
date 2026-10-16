@@ -2,8 +2,8 @@
 REM ArborFDM Windows build: venv + dependencies + tests + PyInstaller (onedir) + zip.
 REM Usage (from any folder):  scripts\build_windows.bat
 REM The console only shows the steps; the full output goes to build\build_windows.log
-REM Needs Python 3.10.1 to 3.14, 64-bit (3.12 recommended). Python 3.10.0 crashes PyInstaller
-REM (bug in its "dis" module); Python 3.15+ has no manifold3d wheel (source build needs TBB).
+REM Needs Python 3.12 to 3.14, 64-bit (3.12 recommended). Python 3.10 and 3.11 crash the GUI
+REM (PySide6 bug); Python 3.15+ has no manifold3d wheel (source build needs TBB).
 setlocal enableextensions
 set "ROOT=%~dp0.."
 pushd "%ROOT%" || exit /b 1
@@ -31,19 +31,19 @@ exit /b %RC%
 
 :inner
 REM everything below goes to the log; "> con" lines are also shown in the console
-REM Pick a supported Python: 3.10.1 to 3.14, 64-bit (manifold3d has no Windows wheel for
-REM newer versions, and 3.10.0 crashes PyInstaller). Prefer 3.12.
+REM Pick a supported Python: 3.12 to 3.14, 64-bit (manifold3d has no Windows wheel for
+REM newer versions, and 3.10 or 3.11 crash the GUI). Prefer 3.12.
 set "PY="
-for %%V in (3.12 3.13 3.11 3.14 3.10) do (
+for %%V in (3.12 3.13 3.14) do (
   if not defined PY (
-    py -%%V -c "import sys; sys.exit(0 if (3, 10, 1) <= sys.version_info[:3] and sys.version_info[:2] <= (3, 14) and sys.maxsize > 2**32 else 1)" >nul 2>&1 && set "PY=py -%%V"
+    py -%%V -c "import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] and sys.version_info[:2] <= (3, 14) and sys.maxsize > 2**32 else 1)" >nul 2>&1 && set "PY=py -%%V"
   )
 )
 if not defined PY (
-  python -c "import sys; sys.exit(0 if (3, 10, 1) <= sys.version_info[:3] and sys.version_info[:2] <= (3, 14) and sys.maxsize > 2**32 else 1)" >nul 2>&1 && set "PY=python"
+  python -c "import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] and sys.version_info[:2] <= (3, 14) and sys.maxsize > 2**32 else 1)" >nul 2>&1 && set "PY=python"
 )
 if not defined PY (
-  echo [ERROR] No supported Python found: need Python 3.10.1 to 3.14, 64-bit ^(3.12 recommended^).> con
+  echo [ERROR] No supported Python found: need Python 3.12 to 3.14, 64-bit ^(3.12 recommended^).> con
   echo         Install Python 3.12 64-bit from python.org, then run this script again.> con
   echo [ERROR] no supported Python
   goto :fail
@@ -53,7 +53,7 @@ echo       using: %PY%> con
 
 echo [1/5] Python environment (.venv-build)> con
 if exist .venv-build\Scripts\python.exe (
-  .venv-build\Scripts\python.exe -c "import sys; sys.exit(0 if (3, 10, 1) <= sys.version_info[:3] and sys.version_info[:2] <= (3, 14) else 1)"
+  .venv-build\Scripts\python.exe -c "import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] and sys.version_info[:2] <= (3, 14) else 1)"
   if errorlevel 1 (
     echo       unsupported Python in .venv-build: recreating it> con
     rmdir /s /q .venv-build

@@ -45,7 +45,7 @@ Pour un build reproductible, utiliser les versions figées de la release : `pip 
 3. Le workflow (runner `windows-latest`, Python 3.12) installe les versions de `packaging/requirements-build.txt`, vérifie que le tag correspond à la version du paquet, lance les tests CLI/export, PyInstaller, un test de la CLI gelée, crée le zip, `SHA256SUMS.txt`, et une **release brouillon** avec le zip, les sommes et `THIRD_PARTY_NOTICES.txt`. Le zip est aussi disponible 30 jours en artefact du workflow.
 4. Relire la release brouillon (notes, fichiers), tester le zip sur une machine Windows, puis cliquer *Publish release*.
 
-`tests.yml` lance la suite complète sur Ubuntu (Python 3.10, 3.12, 3.14) et Windows (3.12) à chaque push sur `main` et chaque pull request. Ces deux workflows ont été validés localement (`actionlint` 1.7.12, analyse YAML) mais **n'ont jamais tourné sur GitHub** : le premier passage peut demander des ajustements (bibliothèques système Qt sous Linux, durée).
+`tests.yml` lance la suite complète sur Ubuntu (Python 3.12, 3.13, 3.14) et Windows (3.12) à chaque push sur `main` et chaque pull request. Ces deux workflows ont été validés localement (`actionlint` 1.7.12, analyse YAML) mais **n'ont jamais tourné sur GitHub** : le premier passage peut demander des ajustements (bibliothèques système Qt sous Linux, durée).
 
 ## SmartScreen, antivirus et signature
 

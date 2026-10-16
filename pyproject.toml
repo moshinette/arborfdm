@@ -12,7 +12,7 @@ license = "GPL-3.0-or-later"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 # 3.10.0 crashes PyInstaller (bug in its "dis" module); manifold3d has no wheel for 3.15+
 # (a source build needs TBB). Remove the upper bound once manifold3d publishes 3.15 wheels.
-requires-python = ">=3.10.1,<3.15"
+requires-python = ">=3.12,<3.15"
 keywords = ["3d-printing", "fdm", "supports", "tree-supports", "miniatures", "3mf", "stl"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -24,8 +24,6 @@ classifiers = [
   "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",

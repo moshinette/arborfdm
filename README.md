@@ -34,7 +34,7 @@ The executables are **not code-signed**. Windows SmartScreen will show "Windows 
 
 ## Install from source (Windows, Linux, macOS)
 
-Requires **Python 3.10.1 to 3.14, 64-bit** (3.12 recommended). Python 3.15+ does not work yet (no `manifold3d` package), Python 3.10.0 has a bug that breaks the Windows build.
+Requires **Python 3.12 to 3.14, 64-bit** (3.12 recommended). Python 3.15+ does not work yet (no `manifold3d` package); Python 3.10 and 3.11 crash in the GUI (PySide6 bug).
 
 ```
 git clone <repository URL> arborfdm
@@ -121,7 +121,7 @@ Questions and bugs: GitHub issues. Security problems: see [`SECURITY.md`](SECURI
 > **Version précoce (0.2.0), non validée par des essais d'impression systématiques.** Les profils (pointes, densités, pieds) sont des points de départ raisonnés ; seul OrcaSlicer a été essayé. Lisez [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) et partagez vos résultats.
 
 - **Windows** : téléchargez `ArborFDM-<version>-windows-x64.zip` dans les *Releases* du dépôt, vérifiez le SHA-256 (`certutil -hashfile <zip> SHA256`), dézippez, lancez `ArborFDM.exe`. L'exécutable n'est pas signé : SmartScreen affiche un avertissement (*Informations complémentaires*, puis *Exécuter quand même*) et certains antivirus peuvent signaler un faux positif (voir `docs/PACKAGING.md`).
-- **Depuis les sources** : Python 3.10.1 à 3.14 en 64 bits (3.12 conseillé), puis `python -m pip install -e ".[gui]"` dans un venv ; lancement avec `python -m arbor.app.main` (interface) ou `python -m arbor --help` (CLI).
+- **Depuis les sources** : Python 3.12 à 3.14 en 64 bits (3.12 conseillé), puis `python -m pip install -e ".[gui]"` dans un venv ; lancement avec `python -m arbor.app.main` (interface) ou `python -m arbor --help` (CLI).
 - **Dans le slicer** : désactivez les supports automatiques, réglez la même buse que le profil ArborFDM, répondez **Oui** à la question « objet multi-pièces ».
 - La documentation détaillée (`docs/`) est en français ; l'interface est en anglais.
 - Contributions et retours d'impression bienvenus en français ou en anglais : [`CONTRIBUTING.md`](CONTRIBUTING.md). Ne joignez jamais de modèles payants ou sous licence.
