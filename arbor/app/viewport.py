@@ -183,9 +183,10 @@ class OverhangLegend(QtWidgets.QFrame):
         lay.addWidget(note, len(overhang.BAND_KEYS) + 1, 0, 1, 3)
         self.set_state(55.0, None)
 
-    def set_state(self, threshold: float, areas: Optional[np.ndarray]) -> None:
+    def set_state(self, threshold: float, areas: Optional[np.ndarray],
+                  severe: Optional[float] = None) -> None:
         self.title.setText(f"Overhangs  (threshold {threshold:.0f}\u00b0)")
-        for b in overhang.bands(threshold):
+        for b in overhang.bands(threshold, severe):
             self.range_labels[b.key].setText(b.label)
         for k, key in enumerate(overhang.BAND_KEYS):
             self.area_labels[key].setText("" if areas is None else f"{areas[k]:.0f} mm\u00b2")
@@ -328,6 +329,7 @@ class Viewport(gl.GLViewWidget):
         # overhang colouring (display only)
         self.overhang_enabled = False
         self.overhang_threshold = 55.0
+        self.overhang_severe: Optional[float] = None   # engine severe angle (sparser below)
         self.overhang_plate_height = 0.12
         self.overhang_classes: Optional[np.ndarray] = None     # band index per shown face
         self.overhang_areas: Optional[np.ndarray] = None
@@ -469,12 +471,15 @@ class Viewport(gl.GLViewWidget):
             self.overhang_enabled = enabled
             self._update_overhang_colors()
 
-    def set_overhang_params(self, threshold_deg: float, plate_height: float) -> None:
-        """Current overhang_angle_deg and layer height: colours follow them."""
+    def set_overhang_params(self, threshold_deg: float, plate_height: float,
+                            severe_deg: Optional[float] = None) -> None:
+        """Current overhang_angle_deg, layer height and the engine's severe angle
+        (analysis.severe_overhang_angle_deg): colours follow them."""
         t, h = float(threshold_deg), float(plate_height)
-        if (t, h) == (self.overhang_threshold, self.overhang_plate_height):
+        sv = None if severe_deg is None else float(severe_deg)
+        if (t, h, sv) == (self.overhang_threshold, self.overhang_plate_height, self.overhang_severe):
             return
-        self.overhang_threshold, self.overhang_plate_height = t, h
+        self.overhang_threshold, self.overhang_plate_height, self.overhang_severe = t, h, sv
         if self.overhang_enabled:
             self._update_overhang_colors()
 
@@ -496,7 +501,7 @@ class Viewport(gl.GLViewWidget):
             self._overhang_key = None
             self.overhang_legend.hide()
             return
-        key = (id(mesh), self.overhang_threshold, self.overhang_plate_height)
+        key = (id(mesh), self.overhang_threshold, self.overhang_plate_height, self.overhang_severe)
         if key == self._overhang_key and self.model_item.has_custom_colors() \
                 and self._angle_cache is not None and self._angle_cache[0] is mesh:
             return          # same mesh, same settings: colours already uploaded
@@ -504,7 +509,8 @@ class Viewport(gl.GLViewWidget):
         t0 = time.perf_counter()
         angles, top_z, areas = self._face_data(mesh)
         t1 = time.perf_counter()
-        cls = overhang.classify(angles, self.overhang_threshold, top_z, self.overhang_plate_height)
+        cls = overhang.classify(angles, self.overhang_threshold, top_z, self.overhang_plate_height,
+                                self.overhang_severe)
         rgba = overhang.vertex_colors(cls, theme.MODEL_COLOR, FaceColorMeshItem.COLOR_DTYPE)
         t2 = time.perf_counter()
         self.model_item.set_vertex_colors(rgba)
@@ -512,7 +518,8 @@ class Viewport(gl.GLViewWidget):
         self.overhang_areas = overhang.band_areas(cls, areas)
         self.overhang_timings = {"angles_s": t1 - t0, "classify_s": t2 - t1,
                                  "faces": float(len(cls))}
-        self.overhang_legend.set_state(self.overhang_threshold, self.overhang_areas)
+        self.overhang_legend.set_state(self.overhang_threshold, self.overhang_areas,
+                                       self.overhang_severe)
         self.overhang_legend.show()
         self._place_legend()
         self.update()

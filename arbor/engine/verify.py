@@ -143,6 +143,10 @@ def _check_regions(analysis: AnalysisResult, contacts, routed_ids, params, issue
     big_area = 0.25 * params.contact_spacing ** 2
     for reg in analysis.regions:
         if len(pts):
+            if reg.kind == "overhang" and getattr(reg, "severity", "severe") == "mild":
+                z_below = max(4 * lh, reach * max(1.0, float(getattr(params, "mild_overhang_spacing", 1.0))))
+            else:
+                z_below = max(4 * lh, reach)
             zmask = (pts[:, 2] >= reg.z - z_below) & (pts[:, 2] <= reg.z + 2 * lh + 0.05)
             cand = pts[zmask]
         else:
@@ -154,7 +158,10 @@ def _check_regions(analysis: AnalysisResult, contacts, routed_ids, params, issue
             else:  # pragma: no cover
                 from shapely.geometry import Point
                 d = np.array([reg.polygon.distance(Point(p[:2])) for p in cand])
-            covered = bool(np.min(d) <= reach)
+            r_reg = reach
+            if reg.kind == "overhang" and getattr(reg, "severity", "severe") == "mild":
+                r_reg = reach * max(1.0, float(getattr(params, "mild_overhang_spacing", 1.0)))
+            covered = bool(np.min(d) <= r_reg)
         if covered:
             continue
         c = reg.polygon.representative_point()
@@ -980,6 +987,9 @@ def support_stats(mesh, contacts, tree: SupportTree, support_mesh, raft_mesh,
     raft_volume_mm3, raft_mass_g   same for the raft (0 without raft)
     contact_area_mm2    sum of the areas where supports touch the model (tip discs and
                         pads on the model, pi r^2 of their node radius): proxy of the marks
+    welded_contact_area_mm2  the part of it fused to the model (tips without the support
+                        interface gap, pads): the marks that need breaking off
+    interface_gap_contacts   tips separated from the model by the interface gap
     model_contacts      number of places where supports touch the model (tips + pads)
     tip_contacts, model_feet       the two parts of model_contacts
     max_tree_height_mm  highest top of a tree above its root (plate foot or pad)
@@ -1003,6 +1013,10 @@ def support_stats(mesh, contacts, tree: SupportTree, support_mesh, raft_mesh,
         for r in {root[i] for i in order}:
             height = max(height, ztop[r] - float(tree.nodes[r].position[2]))
     recs = sections if sections is not None else (section_slenderness(tree, params) if nodes else [])
+    # tips behind a support interface gap are not fused to the model (tree.contact_gap)
+    gap_ids = getattr(tree, "interface_gap_ids", set()) if tree is not None else set()
+    gapped = [n for n in tips if n.contact_id in gap_ids]
+    gap_area = float(sum(np.pi * float(n.radius) ** 2 for n in gapped))
     by_code: dict[str, int] = {}
     for i in issues:
         by_code[i.code] = by_code.get(i.code, 0) + 1
@@ -1012,6 +1026,8 @@ def support_stats(mesh, contacts, tree: SupportTree, support_mesh, raft_mesh,
         "raft_volume_mm3": rv,
         "raft_mass_g": rv * PLA_DENSITY / 1000.0,
         "contact_area_mm2": area,
+        "welded_contact_area_mm2": area - gap_area,
+        "interface_gap_contacts": len(gapped),
         "model_contacts": len(tips) + len(pads),
         "tip_contacts": len(tips),
         "model_feet": len(pads),

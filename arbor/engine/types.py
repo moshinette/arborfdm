@@ -58,6 +58,9 @@ class SupportRegion:
     z: float                         # layer height where the region appears
     polygon: object                  # shapely Polygon / MultiPolygon in XY
     area: float
+    # overhangs only: "severe" when some of it steps out farther than the severe step
+    # (analysis.severe_layer_step), "mild" otherwise; islands are always "severe"
+    severity: str = "severe"
 
 
 @dataclass
@@ -66,6 +69,7 @@ class AnalysisResult:
     layer_z: np.ndarray                              # (L,) slice heights
     regions: list[SupportRegion] = field(default_factory=list)
     overhang_face_mask: Optional[np.ndarray] = None  # (F,) bool, faces needing support
+    severe_face_mask: Optional[np.ndarray] = None    # (F,) bool, subset tilted past the severe angle
     hanging_edges: list[tuple[np.ndarray, np.ndarray]] = field(default_factory=list)
     corners: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
     low_points: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
@@ -94,6 +98,8 @@ class TreeNode:
 @dataclass
 class SupportTree:
     nodes: dict[int, TreeNode] = field(default_factory=dict)
+    # contacts whose tip stops one support interface gap below the model (not fused)
+    interface_gap_ids: set = field(default_factory=set)
 
     def add(self, position, radius, kind, parent=None, contact_id=None) -> TreeNode:
         nid = len(self.nodes)

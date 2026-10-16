@@ -311,7 +311,9 @@ def test_release_gap_keeps_model_unsupported_and_tips_on_model(figurine, fig_foo
     assert not any(c.position[2] < P02.layer_height for c in r.contacts)
     assert r.raft_mesh.bounds[1, 2] == pytest.approx(-G, abs=1e-6)
     tips = np.array([n.position for n in r.tree.nodes.values() if n.kind == NodeKind.TIP])
-    assert trimesh.proximity.closest_point(figurine, tips)[1].max() < 0.1
+    # tips touch the model or stop one support interface gap (+ rim clearance) below it
+    lim = P02.interface_gap_layers * P02.layer_height + 0.5 * P02.tip_diameter + 0.1
+    assert trimesh.proximity.closest_point(figurine, tips)[1].max() < lim
     welded = pipeline.generate(figurine, P02.updated(raft_release_gap=0.0))
     assert welded.raft_mesh.bounds[1, 2] == pytest.approx(0.0, abs=1e-6)
     assert welded.plate_z == pytest.approx(-P02.raft_thickness)

@@ -6,7 +6,7 @@ Date : 2026-10-15. Machine : conteneur Linux, 2 cœurs, 7,8 Gio, Python 3.13.16,
 
 Commande : `QT_QPA_PLATFORM=offscreen python3 -m pytest -q -p no:cacheprovider`
 
-Résultat : **649 passed, 1 skipped, 0 failed** (2026-10-16, après l export « un objet, plusieurs pièces » quand le modèle repose sur le raft : suite complète 648 passed + `tests/test_raft_lift.py` adapté au nouveau format puis relancé seul, 17 passed ; le test sauté vérifie un dossier en lecture seule, sans effet en root).
+Résultat : **662 passed, 1 skipped, 0 failed** (2026-10-16, branche `angirard/overhang-severity-interface-gap` : jeu d'interface et sévérité des surplombs, nouveaux tests `tests/test_severity_gap.py` ; le test sauté vérifie un dossier en lecture seule, sans effet en root).
 
 Les 3 avertissements sont des `RuntimeWarning: invalid value encountered in divide` dans `trimesh/triangles.py` (normales de triangles d'aire nulle), sans effet sur les assertions.
 

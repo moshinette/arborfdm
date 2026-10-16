@@ -102,6 +102,17 @@ def _run_limited(code: str, mem_gb: float, timeout: float = 600):
     return p.returncode, p.stdout, p.stderr, wall, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
 
 
+def _tip_distances_ok(r, params, d_contacts, contacts, welded_tol):
+    """Welded tips (islands, anchors, low points) touch the model (distance <= welded_tol);
+    tips behind the support interface gap stay one gap below it without touching."""
+    gap = int(params.interface_gap_layers) * params.layer_height
+    for c, d in zip(contacts, d_contacts):
+        if c.id in r.tree.interface_gap_ids:
+            assert 0.5 * gap <= d <= 2 * gap + 0.5 * params.tip_diameter + 0.02, (c.id, d)
+        else:
+            assert d <= welded_tol, (c.id, d)
+
+
 # ===========================================================================
 # 1. engine on hard cases
 # ===========================================================================
@@ -110,9 +121,10 @@ def test_figurine_normal_tips_touch_and_no_error(fig_normal, figurine):
     assert r.errors == [], [i.message for i in r.errors]
     routed = _routed(r)
     assert routed == {c.id for c in r.contacts if c.enabled}
-    P = np.array([c.position for c in r.contacts if c.id in routed])
+    cs = [c for c in r.contacts if c.id in routed]
+    P = np.array([c.position for c in cs])
     _, d, _ = trimesh.proximity.closest_point(r.support_mesh, P)
-    assert d.max() <= NORMAL.tip_penetration + 0.02          # every tip really touches
+    _tip_distances_ok(r, NORMAL, d, cs, NORMAL.tip_penetration + 0.02)   # every tip really reaches
     mf = np.array([n.position for n in r.tree.nodes.values() if n.kind == NodeKind.MODEL_FOOT])
     _, dm, _ = trimesh.proximity.closest_point(figurine, mf.reshape(-1, 3))
     assert dm.max() <= 0.1                                   # model feet are on the model
@@ -147,9 +159,10 @@ def test_rotated_and_scaled_figurine(figurine):
     # not below the support base (raft top, below z = 0 under the model since v0.2)
     assert r.support_mesh.bounds[0, 2] >= r.tree.z_base - 1e-6
     routed = _routed(r)
-    P = np.array([c.position for c in r.contacts if c.id in routed])
+    cs = [c for c in r.contacts if c.id in routed]
+    P = np.array([c.position for c in cs])
     _, d, _ = trimesh.proximity.closest_point(r.support_mesh, P)
-    assert d.max() <= 0.1
+    _tip_distances_ok(r, NORMAL, d, cs, 0.1)
 
 
 def test_raft_supports_stand_on_raft_and_avoid_model(figurine):
@@ -448,10 +461,11 @@ def test_3mf_trimesh_readback_keeps_geometry(fig_export, figurine):
     assert np.allclose(parts["figurine"].bounds, figurine.bounds + res.offset, atol=1e-4)
     lo = np.min([g.bounds[0] for g in parts.values()], axis=0)
     assert np.all(lo >= -1e-6)
-    # tips still touch the model after the round trip
-    P = np.array([c.position for c in r.contacts if c.id in _routed(r)]) + res.offset
+    # tips still reach the model after the round trip (touching or one gap below)
+    cs = [c for c in r.contacts if c.id in _routed(r)]
+    P = np.array([c.position for c in cs]) + res.offset
     _, dist, _ = trimesh.proximity.closest_point(parts["figurine supports"], P)
-    assert dist.max() < 0.1
+    _tip_distances_ok(r, p, dist, cs, 0.1)
 
 
 def test_3mf_lib3mf_independent_validation(fig_export):

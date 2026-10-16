@@ -36,14 +36,15 @@ Bouton **Overhangs** dans la barre de vue (capture `14_overhang_colors.png`). Le
 |---|---|---|
 | couleur normale | angle < S - 10° (et toute face orientée vers le haut) | pas de support nécessaire |
 | jaune | S - 10° à S | proche du seuil |
-| orange | S à S + (90 - S) / 2 | au-delà du seuil : support nécessaire |
-| rouge | S + (90 - S) / 2 à 90° | surplomb fort, jusqu'au plafond |
+| orange | S à A | surplomb **modéré** : supporté, mais avec des contacts plus espacés (« Moderate overhang spacing ») |
+| rouge | A à 90° | surplomb **sévère** : densité de contacts normale, jusqu'au plafond |
 
-Exemple avec S = 55° : jaune 45 à 55°, orange 55 à 72°, rouge 72 à 90°. La légende en bas à droite de la vue rappelle les plages en degrés et la surface (mm²) de chaque plage. Les faces posées sur le plateau (sous une hauteur de couche) ne sont jamais colorées, comme dans la détection.
+A est l'angle au-delà duquel une couche dépasse la précédente de plus de 0,75 largeur de ligne : 64° avec les profils 0,2 mm, 69° avec les profils 0,4 mm. Si « Moderate overhang spacing » vaut 1 (aucune distinction), A = S + (90 - S) / 2. Exemple avec un profil 0,2 et S = 55° : jaune 45 à 55°, orange 55 à 64°, rouge 64 à 90°. La légende en bas à droite de la vue rappelle les plages en degrés et la surface (mm²) de chaque plage. Les faces posées sur le plateau (sous une hauteur de couche) ne sont jamais colorées, comme dans la détection.
 
 - **Automatique par défaut** : actif tant qu'aucun support n'est généré, désactivé ensuite pour laisser voir les supports. Un clic sur le bouton force l'état (activé ou non) et ce choix est conservé ; **View > Overhang colors: automatic** revient au mode automatique.
 - Les couleurs suivent le seuil (panneau simple ou Advanced) et sont recalculées quand le modèle tourne ou est mis à l'échelle, ainsi qu'avec la coupe par hauteur.
 - Affichage seulement : la géométrie n'est pas modifiée. Le clic gauche pour ajouter un contact et le clic droit pour le supprimer fonctionnent normalement dans ce mode.
+- Deux réglages liés (onglet Advanced, version 0.4) : **Moderate overhang spacing** (2 par défaut : contacts deux fois plus espacés sur l'orange) et **Interface gap** (1 couche par défaut : les pointes d'arêtes, de coins et de surfaces s'arrêtent une couche sous le modèle et ne lui sont pas soudées, comme le « top Z distance » des supports d'un trancheur ; les mains, les îlots et les points bas restent soudés). Mettre l'un ou l'autre à 1 / 0 revient au comportement de la version 0.3.
 - C'est une indication par face ; la détection réelle (« Generate supports ») tient aussi compte des couches, des îlots et des arêtes pendantes.
 
 ## 2 ter. Presets personnalisés

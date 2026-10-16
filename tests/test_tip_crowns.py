@@ -50,9 +50,10 @@ def _blade(width: float, length: float = 16.0, thick: float = 0.6, z: float = 10
     return trimesh.boolean.union([a, b], engine="manifold")
 
 
-def _coverage(mesh, analysis, contacts, select=None):
-    """Distances from a 0.1 mm lattice on the overhanging faces to the nearest contact."""
-    ids = np.nonzero(analysis.overhang_face_mask)[0]
+def _coverage(mesh, analysis, contacts, select=None, mask=None):
+    """Distances from a 0.1 mm lattice on the overhanging faces (or on mask) to the
+    nearest contact."""
+    ids = np.nonzero(analysis.overhang_face_mask if mask is None else mask)[0]
     S, _ = _lattice_on_faces(np.asarray(mesh.vertices), np.asarray(mesh.faces), ids, 0.1)
     S = S[S[:, 2] > analysis.layer_height]
     if select is not None:
@@ -123,11 +124,17 @@ def test_sword_side_less_crowded(fig02):
 def test_figurine_coverage_kept(figurine, fig02):
     """Same coverage of the overhanging faces as before the fix (max 2.29 mm overall,
     1.42 mm on each arm side with the 0.2 Normal profile)."""
-    _, contacts, a = fig02
-    d = _coverage(figurine, a, contacts)
-    assert d.max() <= 2.30
+    p, contacts, a = fig02
+    # severe overhangs keep that coverage; moderate ones (mild_overhang_spacing) may have
+    # contacts up to mild_overhang_spacing times farther (measured: 1.57 mm on an arm side)
+    sev = a.severe_face_mask
+    mild = a.overhang_face_mask & ~sev
+    assert _coverage(figurine, a, contacts, mask=sev).max() <= 2.30
     for sel in (lambda S: S[:, 0] > 17, lambda S: S[:, 0] < -17):
-        assert _coverage(figurine, a, contacts, sel).max() <= 1.45
+        assert _coverage(figurine, a, contacts, sel, mask=sev).max() <= 1.45
+        if mild.any():
+            assert _coverage(figurine, a, contacts, sel, mask=mild).max() <= 1.45 * p.mild_overhang_spacing
+    assert _coverage(figurine, a, contacts).max() <= 2.30 * p.mild_overhang_spacing
 
 
 @pytest.mark.parametrize("width", [0.6, 1.2, 1.8])

@@ -32,7 +32,13 @@ from scipy import ndimage
 from scipy.spatial import cKDTree
 
 from .params import SupportParams, model_on_raft, support_base_z
-from .types import Contact, NodeKind, Progress, SupportTree
+from .types import Contact, ContactReason, NodeKind, Progress, SupportTree
+
+# gapped tips whose axis is tilted more than this get a vertical neck of NECK_LAYERS layers
+NECK_MIN_TILT_DEG = 10.0
+NECK_LAYERS = 2
+# contacts whose tip gets the support interface gap (SupportParams.interface_gap_layers)
+INTERFACE_GAP_REASONS = (ContactReason.EDGE, ContactReason.CORNER, ContactReason.SURFACE)
 
 BIG = 1000.0  # "far from the model" distance (mm)
 # Supports are printed without supports of their own: no support surface may lean further
@@ -602,11 +608,19 @@ class _Router:
             rb = self.tip_base_r(tip_r)
             u = self._tip_dir(pos, n)
             base = pos + u * P.tip_length
+            pen, zgap = self.contact_gap(c)
             if P.tip_shape == "ball":
-                tip_pos = pos + n * (tip_r - P.tip_penetration)
+                tip_pos = pos + n * (tip_r - pen)
             else:
-                tip_pos = pos - n * P.tip_penetration
-            tip_pos = tip_pos - np.array([0.0, 0.0, P.z_gap])
+                tip_pos = pos - n * pen
+            tip_pos = tip_pos - np.array([0.0, 0.0, zgap])
+            gapped = zgap > P.z_gap
+            # gapped tip on a tilted axis: a short vertical neck keeps its top disc
+            # horizontal, otherwise the raised rim forces the whole tip one more layer
+            # down (2 air layers measured in Orca's G-code on 19 of 61 flat contacts)
+            neck = gapped and P.tip_shape == "cone" and -u[2] < math.cos(math.radians(NECK_MIN_TILT_DEG))
+            if gapped:
+                tip_pos = self._clear_gap(tip_pos, np.array([0.0, 0.0, 1.0]) if neck else -u, tip_r, zgap)
             if P.raft_enabled and not model_on_raft(P) and pos[2] < zb + self.min_short_gap() - 1e-9:
                 # raft under the feet only: the model stands on the plate and the raft
                 # top is raft_thickness higher; a contact this low has no room for a
@@ -627,6 +641,8 @@ class _Router:
                 tree.failed[c.id] = "tip base would be inside the model (surface faces up?)"
                 continue
             tip = tree.add(tip_pos, tip_r, NodeKind.TIP, contact_id=c.id)
+            if gapped:
+                tree.interface_gap_ids.add(c.id)
             if base[2] < zb + 0.5 * dz:
                 # contact close to the plate: the tip goes straight to a foot
                 t = (pos[2] - zb) / max(-u[2], 1e-6)
@@ -636,8 +652,24 @@ class _Router:
                 tip.parent = f.id
                 tree.foot_radius[f.id] = self._foot_r(fpos, f.radius)
                 continue
+            neck_pos = None
+            if neck:
+                # the cone below the neck keeps the tip axis u (a steeper segment would
+                # overhang more): its base slides back under the tip by hn x tan(tilt)
+                hn = NECK_LAYERS * P.layer_height
+                neck_pos = tip_pos - np.array([0.0, 0.0, hn])
+                t = (neck_pos[2] - base[2]) / max(-u[2], 1e-6)
+                base2 = neck_pos + u * t
+                if t > 0.25 * P.tip_length and not self.grid.inside(base2):
+                    base = base2
+                else:
+                    neck_pos = None
             b = tree.add(base, rb, NodeKind.BRANCH, contact_id=c.id)
             tip.parent = b.id
+            if neck_pos is not None:
+                nk = tree.add(neck_pos, tip_r, NodeKind.BRANCH, contact_id=c.id)
+                nk.parent = b.id
+                tip.parent = nk.id
             kb = self._base_level(base[2])
             move = (base[2] - (zb + kb * dz)) * self.tan
             self.pending.append((kb, b.id, move, max(self.r_min, rb)))
@@ -653,6 +685,55 @@ class _Router:
         return max(self.r_tipbase, tip_r + 0.5 * max(P.tip_base_diameter - P.tip_diameter, 0.0))
 
     # -- short supports (contact just above a surface) ----------------------------
+    def contact_gap(self, c) -> tuple[float, float]:
+        """(penetration, vertical gap) of the tip of contact c.
+
+        Support interface (interface_gap_layers > 0): edge, corner and surface tips stop
+        z_gap + interface_gap_layers layers below the contact without penetrating, so the
+        slicer leaves an air layer between support and model (the tip releases instead of
+        being fused). Islands, their anchors, low points and manual contacts stay welded
+        (tip_penetration, z_gap): a part starting in the air needs its first layers held."""
+        P = self.P
+        k = int(getattr(P, "interface_gap_layers", 0) or 0)
+        if k > 0 and getattr(c, "reason", None) in INTERFACE_GAP_REASONS:
+            return 0.0, float(P.z_gap) + k * float(P.layer_height)
+        return float(P.tip_penetration), float(P.z_gap)
+
+    def _clear_gap(self, tip_pos: np.ndarray, axis: np.ndarray, tip_r: float, gap: float,
+                   floor: float | None = None) -> np.ndarray:
+        """Lower a gapped tip until its whole top disc (radius tip_r, perpendicular to
+        axis, the direction from the tip base to the tip) is at least gap below the
+        model surface, measured vertically as a slicer sees it. Without this the rim of a
+        tilted disc under a sloped face rises into the air layer (measured on the
+        figurine: 26 of 87 tips closer than 0.06 mm, some touching). The drop is capped
+        at tip_r + gap and never goes below floor."""
+        if not hasattr(self, "_gap_caster"):
+            from .contacts import VerticalCaster
+            self._gap_caster = VerticalCaster(self.mesh)
+        a = np.asarray(axis, float)
+        a = a / max(np.linalg.norm(a), 1e-12)
+        e1 = np.cross(a, [1.0, 0.0, 0.0] if abs(a[0]) < 0.9 else [0.0, 1.0, 0.0])
+        e1 /= np.linalg.norm(e1)
+        e2 = np.cross(a, e1)
+        ang = np.arange(12) * (2 * math.pi / 12)
+        rim = tip_pos + tip_r * (np.cos(ang)[:, None] * e1 + np.sin(ang)[:, None] * e2)
+        pts = np.vstack([tip_pos, rim])
+        drop = 0.0
+        for _ in range(3):
+            q = pts - [0.0, 0.0, drop]
+            z, _ = self._gap_caster.cast(np.column_stack([q[:, :2], q[:, 2] - 0.5]))
+            ok = np.isfinite(z)
+            if not ok.any():
+                break
+            deficit = gap - float((z[ok] - q[ok, 2]).min())
+            if deficit < 1e-4:
+                break
+            drop = min(drop + deficit, tip_r + gap)
+        out = tip_pos - [0.0, 0.0, drop]
+        if floor is not None and out[2] < floor:
+            out[2] = max(floor, tip_pos[2] - drop)
+        return out
+
     def min_short_gap(self) -> float:
         """Smallest free height under a contact for which a support is built.
 
@@ -736,7 +817,11 @@ class _Router:
         only when allow_on_model). Below min_short_gap() nothing is built and the reason
         goes to tree.failed."""
         P, tree = self.P, self.tree
-        gap = pos[2] - P.z_gap - floor_z
+        pen, zgap = self.contact_gap(c)
+        if zgap > P.z_gap and pos[2] - zgap - floor_z < self.min_short_gap() - 1e-9:
+            # no room for an air layer and a support layer: welded tip, as without interface
+            pen, zgap = float(P.tip_penetration), float(P.z_gap)
+        gap = pos[2] - zgap - floor_z
         where = "build plate" if on_plate else "model"
         if gap < self.min_short_gap() - 1e-9:
             tree.failed[c.id] = (f"only {pos[2] - floor_z:.2f} mm free under the contact (surface of the "
@@ -747,8 +832,13 @@ class _Router:
             tree.failed[c.id] = (f"only {pos[2] - floor_z:.2f} mm above the model: a short support "
                                  f"would stand on the model and supports on the model are disabled")
             return
-        tip_pos = pos - n * P.tip_penetration - np.array([0.0, 0.0, P.z_gap])
+        tip_pos = pos - n * pen - np.array([0.0, 0.0, zgap])
+        if zgap > P.z_gap:
+            tip_pos = self._clear_gap(tip_pos, np.array([0.0, 0.0, 1.0]), tip_r, zgap,
+                                      floor=floor_z + P.layer_height)
         tip = tree.add(tip_pos, tip_r, NodeKind.TIP, contact_id=c.id)
+        if zgap > P.z_gap:
+            tree.interface_gap_ids.add(c.id)
         frac = min(1.0, max(gap, 0.0) / max(P.tip_length, 1e-6))
         r_low = tip_r + (self.tip_base_r(tip_r) - tip_r) * frac
         if on_plate:

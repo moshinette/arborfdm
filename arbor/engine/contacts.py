@@ -603,6 +603,12 @@ class _Placer:
         self.mask = analysis.overhang_face_mask
         if self.mask is None or len(self.mask) != len(self.f):
             self.mask = np.zeros(len(self.f), dtype=bool)
+        self.sev = analysis.severe_face_mask
+        if self.sev is None or len(self.sev) != len(self.f):
+            self.sev = self.mask
+        # moderate overhangs (overhang faces not tilted past the severe angle): surface
+        # contacts mild_overhang_spacing times sparser (docs/ALGORITHM.md, severity)
+        self.mild_k = max(1.0, float(params.mild_overhang_spacing))
         self.slot_of: list[int] = []      # coverage index -> index in self.out (-1 manual)
         for c in manual:
             self.cov.add(np.asarray(c.position, float))
@@ -756,6 +762,16 @@ class _Placer:
             nrm = self.normal_of(f2)
             for j, k in enumerate(idx):
                 self.offer(pos[j], nrm[j], reason, note_fn(int(k), pos[j], nrm[j]), radius=radius)
+
+    def split_mild(self, fid: np.ndarray) -> np.ndarray:
+        """True for candidates lying on a moderate (not severe) overhanging face."""
+        fid = np.asarray(fid)
+        if self.mild_k <= 1.0:
+            return np.zeros(len(fid), dtype=bool)
+        ok = fid >= 0
+        out = np.zeros(len(fid), dtype=bool)
+        out[ok] = self.mask[fid[ok]] & ~self.sev[fid[ok]]
+        return out
 
     def normal_of(self, fid):
         fid = np.asarray(fid)
@@ -1076,8 +1092,22 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
                 return f"fill of island at z={r.z:.2f} mm (area {r.area:.1f} mm2)"
             return f"unsupported area at z={r.z:.2f} mm (area {r.area:.1f} mm2)"
 
-        P.offer_stream(pos, fid, min(0.25 * P.s, 0.6), kind, P.r_s, fill_note,
-                       lambda i, n: progress.update(0.5 + 0.3 * i / max(1, n), "Filling overhang areas"))
+        mild = P.split_mild(fid) if kind == ContactReason.SURFACE else np.zeros(len(fid), bool)
+        for sub, radius in ((~mild, P.r_s), (mild, P.r_s * P.mild_k)):
+            ids_sub = np.nonzero(sub)[0]
+            if not len(ids_sub):
+                continue
+            is_mild = radius > P.r_s
+
+            def sub_note(k, _p, n_, ids_sub=ids_sub, is_mild=is_mild):
+                txt = fill_note(int(ids_sub[k]), _p, n_)
+                if is_mild:
+                    txt += f"; moderate overhang, contacts {P.mild_k:g}x sparser"
+                return txt
+
+            P.offer_stream(pos[ids_sub], fid[ids_sub], min(0.25 * P.s, 0.6), kind, radius, sub_note,
+                           lambda i, n: progress.update(0.5 + 0.3 * i / max(1, n),
+                                                        "Filling overhang areas"))
 
     # ---- 6. face mask fill --------------------------------------------------
     progress.update(0.8, "Checking overhanging faces")
@@ -1140,9 +1170,23 @@ def place_contacts(mesh: trimesh.Trimesh, analysis: AnalysisResult, params: Supp
                 return (f"downward face ({tilt:.0f} deg from horizontal) at z={pos[2]:.2f} mm, "
                         f"more than {P.s:.1f} mm from any other contact" + coarse_note)
 
-            P.offer_stream(cand, cf, min(0.25 * P.s, 0.6), ContactReason.SURFACE, P.s, residual_note,
-                           lambda i, n: progress.update(0.8 + 0.2 * i / max(1, n),
-                                                        "Checking overhanging faces"))
+            mild = P.split_mild(cf)
+            for sub, radius in ((~mild, P.s), (mild, P.s * P.mild_k)):
+                ids_sub = np.nonzero(sub)[0]
+                if not len(ids_sub):
+                    continue
+                is_mild = radius > P.s
+
+                def sub_note(k, pos, nrm, is_mild=is_mild):
+                    txt = residual_note(k, pos, nrm)
+                    if is_mild:
+                        txt += f"; moderate overhang, contacts {P.mild_k:g}x sparser"
+                    return txt
+
+                P.offer_stream(cand[ids_sub], cf[ids_sub], min(0.25 * P.s, 0.6), ContactReason.SURFACE,
+                               radius, sub_note,
+                               lambda i, n: progress.update(0.8 + 0.2 * i / max(1, n),
+                                                            "Checking overhanging faces"))
 
     progress.update(1.0, f"{len(P.out)} contacts placed")
     if isinstance(analysis.stats, dict):

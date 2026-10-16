@@ -25,6 +25,8 @@
     "raft_thickness": 0.16,
     "raft_enabled": true,
     "hollow_wall": 0.66,
-    "raft_release_gap": 0.08
+    "raft_release_gap": 0.08,
+    "interface_gap_layers": 1,
+    "mild_overhang_spacing": 2.0
   }
 }

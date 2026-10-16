@@ -8,8 +8,10 @@ plate (max z below one layer) never need it, as in arbor.engine.analysis.
 Bands relative to the current threshold T:
   ok        a < T - NEAR_MARGIN_DEG               normal model colour
   near      T - NEAR_MARGIN_DEG <= a < T          yellow (close to the threshold)
-  over      T <= a < T + (90 - T) / 2             orange (needs support)
-  severe    a >= T + (90 - T) / 2                 red (strong overhang, up to a ceiling)
+  over      T <= a < S                            orange (needs support)
+  severe    a >= S                                red (strong overhang, up to a ceiling)
+S is the engine's severe angle (analysis.severe_overhang_angle_deg: moderate overhangs
+between T and S get sparser contacts) when given, else T + (90 - T) / 2.
 """
 from __future__ import annotations
 
@@ -36,17 +38,24 @@ class Band:
     label: str
 
 
-def band_edges(threshold: float) -> tuple[float, float, float]:
+def band_edges(threshold: float, severe: float | None = None) -> tuple[float, float, float]:
     t = float(np.clip(threshold, 0.0, 90.0))
-    return (max(t - NEAR_MARGIN_DEG, -90.0), t, t + (90.0 - t) / 2.0)
+    mid = t + (90.0 - t) / 2.0
+    if severe is not None and t < float(severe) < 90.0:
+        mid = float(severe)
+    return (max(t - NEAR_MARGIN_DEG, -90.0), t, mid)
 
 
-def bands(threshold: float) -> list[Band]:
-    near, t, mid = band_edges(threshold)
+def bands(threshold: float, severe: float | None = None) -> list[Band]:
+    near, t, mid = band_edges(threshold, severe)
+    if severe is not None and mid == float(severe):
+        over, strong = "moderate, fewer contacts", "severe, full support"
+    else:
+        over, strong = "needs support", "strong overhang"
     return [Band("ok", -90.0, near, f"below {near:.0f}°"),
             Band("near", near, t, f"{near:.0f} - {t:.0f}°  near threshold"),
-            Band("over", t, mid, f"{t:.0f} - {mid:.0f}°  needs support"),
-            Band("severe", mid, 90.0, f"{mid:.0f} - 90°  strong overhang")]
+            Band("over", t, mid, f"{t:.0f} - {mid:.0f}°  {over}"),
+            Band("severe", mid, 90.0, f"{mid:.0f} - 90°  {strong}")]
 
 
 def face_angles(normals: np.ndarray) -> np.ndarray:
@@ -79,9 +88,9 @@ def face_top_z(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
 
 
 def classify(angles: np.ndarray, threshold: float, top_z: np.ndarray | None = None,
-             plate_height: float = 0.0) -> np.ndarray:
+             plate_height: float = 0.0, severe: float | None = None) -> np.ndarray:
     """Band index (0 ok, 1 near, 2 over, 3 severe) of every face (uint8)."""
-    edges = np.asarray(band_edges(threshold), dtype=np.float32)
+    edges = np.asarray(band_edges(threshold, severe), dtype=np.float32)
     cls = np.searchsorted(edges, np.asarray(angles, dtype=np.float32), side="right")
     cls = cls.astype(np.uint8)
     if top_z is not None and plate_height > 0:

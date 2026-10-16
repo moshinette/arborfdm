@@ -124,7 +124,7 @@ def test_tiny_triangles_positions_match_coarse():
 def test_sphere_real_overhang_consistent_across_tessellation(seg):
     """Sphere sunk 1 mm: the junction is at asin(0.9) = 64 deg > 55 deg, so the
     band above the plate overhangs and must get contacts, independently of seg."""
-    p = P()
+    p = P().updated(mild_overhang_spacing=1.0)   # placement rules alone (no severity)
     _, cs = place(S.sphere_on_plate(sink=1.0, seg=seg), p)
     _, ref = place(S.sphere_on_plate(sink=1.0, seg=96), p)
     assert 8 <= len(cs) and abs(len(cs) - len(ref)) <= max(2, 0.2 * len(ref))

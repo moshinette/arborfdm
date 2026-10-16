@@ -103,7 +103,7 @@ def test_floating_sphere_gets_anchor_ring():
         assert d == pytest.approx(2.6, abs=0.02)
         assert c.normal[2] < -0.8
     # the anchors replace the regular contacts that were "covered" by the lowest one
-    plain, _ = _place(s, P02.updated(island_anchor_height=0))
+    plain, _ = _place(s, P02.updated(island_anchor_height=0, mild_overhang_spacing=1.0))
     assert not _anchors(plain)
     assert all(c.tip_diameter is None for c in plain)
     first_plain = min(c.position[2] for c in plain if c.reason != ContactReason.ISLAND)

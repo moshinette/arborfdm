@@ -24,6 +24,8 @@ Les composantes qui ne touchent pas du tout la couche précédente sont des **î
 
 **Analyse des faces.** Une face dont l'inclinaison vers le bas dépasse l'angle effectif atan(d / hauteur de couche) (-n_z > sin(angle)) est en surplomb. Cet angle est égal à `overhang_angle_deg` sauf si d est plafonné ou explicite : les deux détecteurs gardent ainsi le même seuil. On en dérive les arêtes suspendues, les coins des surplombs plats et les points bas locaux (bout d'un bras, menton). Cette analyse attrape les pentes qui n'apparaissent que comme des bandes très fines dans les couches.
 
+**Sévérité des surplombs** (`severe_layer_step`, `severe_overhang_angle_deg`, version 0.4). Un surplomb dont chaque couche dépasse la précédente de plus que le seuil mais de moins de `SEVERE_STEP_LINE_WIDTHS` = 0,75 largeur de ligne est **modéré** : le cordon extérieur garde plus de 25 % de recouvrement (classes 25-50 % et 50-75 % d'OrcaSlicer), il s'imprime avec un peu d'affaissement. Au-delà il est **sévère** (classe 75-100 %, pratiquement dans le vide). Angle correspondant : atan(0,75 x largeur / couche), soit 64,1° en buse 0,2 (0,22 / 0,08) et 69,2° en 0,4 (0,42 / 0,12) ; seuil de surplomb 55° dans les deux cas. Chaque région `overhang` porte `severity` (`severe` si la partie qui dépasse 0,75 largeur fait au moins la moitié de `min_region_area`, sinon `mild`), et `AnalysisResult.severe_face_mask` marque les faces au-delà de l'angle sévère. Les îlots sont toujours sévères. `mild_overhang_spacing` = 1 supprime la distinction (comportement 0.3). La vue colore les deux bandes (orange : modéré, contacts plus espacés ; rouge : sévère) avec ces mêmes angles.
+
 ## 2. Placement des contacts (`contacts.py`)
 
 Ordre de priorité (un candidat est ignoré si un contact accepté le couvre déjà) :
@@ -36,6 +38,8 @@ Ordre de priorité (un candidat est ignoré si un contact accepté le couvre dé
 4. rangées le long des arêtes suspendues : segments chaînés en polylignes (coupées aux virages > 45°), échantillonnées régulièrement à `edge_spacing / contact_density`, indépendamment de la tessellation ; sur une **pièce étroite** (lame, sangle, ailette), une seule rangée centrale au lieu d'une par arête (ci-dessous) ;
 5. remplissage des îlots et surplombs en grille hexagonale à `contact_spacing / contact_density` ;
 6. remplissage résiduel : grille XY fixe projetée sur les faces en surplomb ; tout point à plus d'un espacement d'un contact en reçoit un.
+
+Aux étapes 5 et 6, les candidats posés sur une face **modérée** (section 1) sont traités après les autres avec un rayon de couverture multiplié par `mild_overhang_spacing` (2 dans les profils) : contacts deux fois plus espacés, note « moderate overhang, contacts 2x sparser ». Les îlots, leur ancrage, les points bas, les coins et les arêtes gardent la densité normale. `verify` (`unsupported_region`) applique la même portée multipliée aux régions modérées.
 
 **Espacement effectif entre pointes** (`effective_min_contact_distance`) : deux contacts automatiques restent à au moins max(`min_contact_distance`, `tip_base_diameter` + `line_width`), 0,92 mm en buse 0,2 (au lieu de 0,45 à 0,75 selon le profil), 1,42 mm en buse 0,4 (au lieu de 0,8). En dessous, les bases des deux pointes se chevauchent ou laissent une fente plus étroite qu'un trait : le trancheur les imprime en éclats soudés et micro-îlots (remplissage d'espace, rétractions en plus) au lieu de deux cônes nets. Exceptions voulues : le contact obligatoire d'un îlot et la couronne d'ancrage (étape 1b) gardent `min_contact_distance` (grappe volontaire de pointes épaisses dont le haut est extrudé en boucle). `verify` (`contacts_too_close`) utilise le même seuil pour les contacts manuels.
 
@@ -71,6 +75,18 @@ Effet sur les exemples (radeau activé) : figurine 0,2 Normal 124 -> 130 contact
 Limites : non validé par une nouvelle impression ; plus de marques sous les bas ronds (7 pointes épaisses par îlot, 5,5 mm² par main en buse 0,4). Seuls les îlots de l'analyse sont ancrés : un bas rond qui rejoint une partie soutenue avant d'atteindre `min_region_area` (îlot jamais promu) garde son seul contact de point bas. Les pointes ordinaires (0,26 mm en 0,2) restent plus fines que ce que le générateur de parois « classic » d'Orca extrude : le haut de ces pointes n'est imprimé qu'en fragments partout (à traiter par profil ou avec `detect_thin_wall` / Arachne, non mesuré ici). Pointes plus courtes envisagées, non retenues : `tip_length` est global au routage (dégagement, plancher, direction) ; la base élargie donne déjà la raideur.
 
 Les positions sont projetées verticalement sur le modèle (lancer de rayons vers le haut, par blocs pour borner la mémoire). **Évitement des détails** : la rugosité locale (1 - |normale moyenne|) des faces vers le bas dans un rayon de 0,4 mm est mesurée ; sur un point rugueux (écailles, cheveux, doigts), six positions voisines sont essayées et la plus lisse est retenue si elle reste en surplomb et dans la même couche. Chaque contact porte une raison (`ContactReason`) et une note lisible.
+
+### Jeu d'interface (`interface_gap_layers`, version 0.4)
+
+Origine : essai 5 (`docs/PHYSICAL_TESTS.md`) : toutes les pointes étaient soudées au modèle (pénétration de 0,03 mm, aucun jeu), d'où des marques profondes et une pointe restée collée à une main. Les supports des trancheurs laissent au contraire un jeu vertical (« top Z distance ») entre le haut du support et le modèle.
+
+Règle (`tree.contact_gap`) : les pointes des contacts `edge`, `corner` et `surface` s'arrêtent `interface_gap_layers` couches (1 dans les profils) sous le contact, sans pénétration ; le trancheur laisse une couche d'air et pose la première couche du surplomb sur le haut des pointes sans les y fondre. Les contacts d'îlot (et leur couronne d'ancrage), les points bas et les contacts manuels restent soudés (`tip_penetration`, `z_gap`) : une pièce qui commence dans le vide doit être tenue dès ses premières couches (essai 2). Un contact trop proche de la surface du dessous pour une couche d'air plus une couche de support garde la pointe soudée (support court).
+
+Deux corrections géométriques, mesurées :
+- le disque du haut de la pointe est perpendiculaire à son axe ; sous une pente, ou si l'axe est incliné, son bord remonte dans la couche d'air. `_clear_gap` abaisse la pointe jusqu'à ce que tout le disque (centre et 12 points du bord) soit au moins à un jeu sous le modèle, mesuré verticalement comme le voit le trancheur (avant : 26 pointes sur 87 à moins de 0,06 mm, certaines au contact) ;
+- une pointe dont l'axe est incliné de plus de 10° reçoit un **col vertical** de 2 couches sous son sommet (`NECK_LAYERS`) : sinon le bord relevé obligeait à descendre toute la pointe d'une couche de plus (2 couches d'air sur 19 des 61 contacts plats de la figurine, mesuré dans le G-code d'Orca).
+
+Mesure (figurine, 0,2 Normal, export « Open in OrcaSlicer », Orca 2.4.2, A1 mini 0,2, 0.08mm Optimal ; contacts sous des faces presque horizontales, extrusion à moins de 0,12 mm du contact) : avant, 63 contacts sur 63 sans aucune couche vide entre support et modèle ; après, 61 pointes à jeu sur 61 avec exactement une couche vide, les pointes soudées (mains, îlots) toujours sans couche vide. `GenerationResult.stats` : `interface_gap_contacts` (87 sur 103 contacts) et `welded_contact_area_mm2` (4,43 mm² contre 9,56 avant pour `contact_area_mm2`).
 
 ## 3. Routage des arbres (`tree.py`)
 
@@ -184,6 +200,8 @@ Calculées par `verify.support_stats` à chaque génération (comptées dans le 
 | `support_mass_g` | volume x 1,24 g/cm³ (PLA plein : majorant, le trancheur remplit partiellement les gros troncs) |
 | `raft_volume_mm3`, `raft_mass_g` | idem pour le raft (0 sans raft) |
 | `contact_area_mm2` | somme des aires π r² des pointes et des plots posés sur le modèle (indicateur des marques) |
+| `welded_contact_area_mm2` | la part de cette aire soudée au modèle (pointes sans jeu d'interface, plots) : les marques à casser |
+| `interface_gap_contacts` | nombre de pointes séparées du modèle par le jeu d'interface |
 | `model_contacts` | nombre de points de contact avec le modèle = `tip_contacts` + `model_feet` |
 | `max_tree_height_mm` | hauteur maximale d'un arbre au-dessus de sa racine (pied ou plot) |
 | `max_slenderness` | élancement de section maximal (plots compris) |
@@ -200,6 +218,7 @@ Calculées par `verify.support_stats` à chaque génération (comptées dans le 
 | `tip_shape` | `cone` ou `ball` |
 | `tip_penetration` | pénétration volontaire dans le modèle (adhérence de la pointe) |
 | `z_gap` | jeu vertical retiré de la pointe |
+| `interface_gap_layers` | couches d'air entre le modèle et les pointes d'arêtes, de coins et de surfaces (îlots et points bas soudés) |
 | `xy_clearance` | jeu horizontal minimal des branches |
 | `on_model_tip_diameter` | pointe des supports posés sur le modèle |
 | `island_anchor_height` | hauteur suivie au début d'un îlot pour l'ancrage (0 = désactivé) |

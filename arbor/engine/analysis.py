@@ -54,6 +54,12 @@ LOW_POINT_RADIUS = 1.0     # mm, a low point is the lowest vertex within this ra
 # no overlap at all (0 % overlap = floating extrusion in PrusaSlicer's overhang
 # classes, 100 % overhang in OrcaSlicer's): the angle cannot allow more.
 MAX_STEP_LINE_WIDTHS = 1.0
+# Overhang severity: a layer stepping out by more than this many line widths beyond the
+# layer below leaves its outer bead with less than 25 % overlap (OrcaSlicer's 75-100 %
+# overhang class): it droops visibly and needs full support. Between the overhang
+# threshold and this step the overhang is "moderate" (25-50 % / 50-75 % classes, printable
+# with sagging) and gets sparser contacts (SupportParams.mild_overhang_spacing).
+SEVERE_STEP_LINE_WIDTHS = 0.75
 
 
 def max_layer_step(params: SupportParams) -> tuple[float, str]:
@@ -69,6 +75,25 @@ def max_layer_step(params: SupportParams) -> tuple[float, str]:
     if d > cap:
         return float(cap), "line_width"
     return float(d), "angle"
+
+
+def severe_layer_step(params: SupportParams) -> float:
+    """Horizontal step per layer (mm) beyond which an overhang is severe. Equal to
+    max_layer_step (no moderate band) when mild_overhang_spacing <= 1 or when the
+    threshold step is already at or above SEVERE_STEP_LINE_WIDTHS line widths."""
+    d, _ = max_layer_step(params)
+    if params.mild_overhang_spacing <= 1.0:
+        return d
+    return max(d, SEVERE_STEP_LINE_WIDTHS * params.line_width)
+
+
+def severe_overhang_angle_deg(params: SupportParams) -> float:
+    """Face tilt from vertical (deg) matching severe_layer_step."""
+    ds = severe_layer_step(params)
+    d, _ = max_layer_step(params)
+    if ds <= d + 1e-12:
+        return effective_overhang_angle_deg(params)
+    return float(math.degrees(math.atan2(ds, params.layer_height)))
 
 
 def effective_overhang_angle_deg(params: SupportParams) -> float:
@@ -436,6 +461,9 @@ def analyze(mesh: trimesh.Trimesh, params: SupportParams, progress: Progress) ->
     # ---- layer comparison ---------------------------------------------------
     t = time.perf_counter()
     d, step_source = max_layer_step(params)
+    d_sev = severe_layer_step(params)
+    stats["severe_step"] = d_sev
+    stats["severe_overhang_angle_deg"] = severe_overhang_angle_deg(params)
     stats["max_step"] = d
     stats["max_step_source"] = step_source
     stats["max_step_line_widths"] = d / params.line_width
@@ -494,9 +522,19 @@ def analyze(mesh: trimesh.Trimesh, params: SupportParams, progress: Progress) ->
         if not prev_cs.is_empty() and not support_cs.is_empty():
             unsup = support_cs - prev_cs.offset(d, m3d.JoinType.Miter, 2.0)
             if not unsup.is_empty() and unsup.area() >= min_area:
-                for _, poly in cs_components(unsup):
+                sev_cs = None
+                if d_sev > d + 1e-12:
+                    sev_cs = support_cs - prev_cs.offset(d_sev, m3d.JoinType.Miter, 2.0)
+                for cs_k, poly in cs_components(unsup):
                     if poly.area >= min_area:
-                        regions.append(SupportRegion("overhang", float(z), poly, float(poly.area)))
+                        severity = "severe"
+                        if sev_cs is not None:
+                            # severe when the part beyond the severe step is itself a
+                            # region worth supporting (same min_region_area rule)
+                            inter = cs_k ^ sev_cs
+                            severity = "severe" if inter.area() >= 0.5 * min_area else "mild"
+                        regions.append(SupportRegion("overhang", float(z), poly, float(poly.area),
+                                                     severity))
         prev_cs = cur
         prev_tree = shapely.STRtree(polys)
         prev_label = label
@@ -515,11 +553,17 @@ def analyze(mesh: trimesh.Trimesh, params: SupportParams, progress: Progress) ->
     stats["n_regions"] = len(regions)
     stats["n_small_islands_dropped"] = n_small_islands
     stats["overhang_area"] = float(sum(r.area for r in regions if r.kind == "overhang"))
+    stats["mild_overhang_area"] = float(sum(r.area for r in regions
+                                            if r.kind == "overhang" and r.severity == "mild"))
+    fn = np.asarray(mesh.face_normals, dtype=np.float64)
+    sev_mask = mask & (-fn[:, 2] > math.sin(math.radians(severe_overhang_angle_deg(params))) - 1e-9)
+    stats["n_mild_faces"] = int((mask & ~sev_mask).sum())
     stats["island_area"] = float(sum(r.area for r in regions if r.kind == "island"))
     stats["corner_vertex_ids"] = [int(x) for x in corner_idx]      # JSON friendly
     stats["low_point_vertex_ids"] = [int(x) for x in low_idx]
     timings["total"] = time.perf_counter() - t_all
     stats["timings"] = timings
     return AnalysisResult(layer_height=h, layer_z=layer_z, regions=regions,
-                          overhang_face_mask=mask, hanging_edges=hanging, corners=corners,
+                          overhang_face_mask=mask, severe_face_mask=sev_mask,
+                          hanging_edges=hanging, corners=corners,
                           low_points=low_points, layer_polygons=layer_polys, stats=stats)

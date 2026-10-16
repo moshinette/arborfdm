@@ -219,3 +219,36 @@ Constat sur les photos : le groupe renversé s'est détaché du plateau d'un seu
 Analyse de la génération équivalente (mesurée, raft `feet`) : les arbres des bouts de bras mesurent 40 à 42 mm. Côté droit, trois arbres de 41-42 mm sont reliés entre eux par des entretoises, mais à rien d'autre ; côté gauche, aucun arbre de bras n'est entretoisé. Hypothèse la plus probable : un amas sur la couronne accroche la buse, et un groupe haut, isolé, ancré par des pieds de 6 mm sur un raft de 0,16 mm, bascule (bras de levier d'environ 40 mm).
 
 Ce que la version 0.3 change déjà pour ce cas : raft `footprint` (une plaque de 1599 mm² au lieu de 821 mm² sous le modèle et les pieds). Ce qu'elle ne change pas : les arbres hauts isolés ne sont pas entretoisés vers le reste de la structure (feuille de route, priorité 1), et les couronnes de pointes des mains.
+
+### Essai 5 : 2026-10-16, figurine d'exemple, version 0.3.0
+
+| Élément | Valeur |
+|---|---|
+| Imprimante, buse | Bambu Lab A1 mini, 0,2 mm |
+| Trancheur | OrcaSlicer 2.4.2, couches de 0,08 mm |
+| Profil ArborFDM | `nozzle_02_normal`, raft `footprint` (modèle posé sur le raft), entretoisement des groupes d'arbres hauts, PLA noir |
+| Résultat | **impression complète**, aucun support renversé ; marques profondes sous les mains, sous les bras et sur l'arête basse du torse |
+
+Constat sur les photos :
+- **Entretoisement** : les colonnes des bouts de bras (environ 40 mm) sont reliées en X à leurs voisines des deux côtés et sont toutes restées debout. Premier essai où ce point passe (échec à l'essai 4).
+- **Raft `footprint`** : une seule plaque ; le socle s'en est détaché proprement (empreinte circulaire nette du socle et des pieds sur le raft).
+- **Marques** : sur chaque main (sphère), un cercle de creux à l'emplacement de la couronne d'ancrage ; sur la main droite, une pointe est restée soudée à la sphère et s'est cassée plus bas (cône entier encore attaché). Dessous des bras rugueux près de la main et près du torse ; arête basse avant du torse arrachée par endroits.
+- Fils entre les supports (réglages de rétraction du trancheur, pas la géométrie).
+
+Analyse : en 0.3.0, toutes les pointes pénètrent le modèle de 0,03 mm sans aucun jeu vertical. Mesuré dans le G-code d'Orca (même chaîne qu'à l'essai 3) : sur les 63 contacts placés sous des faces presque horizontales, aucun n'a de couche vide entre le haut du support et le modèle : le trancheur les fond ensemble, la pointe se casse donc dans le modèle ou dans le cône. Les trancheurs laissent au contraire une couche d'air (« top Z distance »). Par ailleurs, le seuil de 55° plaçait autant de contacts sur des surplombs modérés (côtés des bras cylindriques, 59°) que sur des plafonds.
+
+Corrections (version 0.4, `docs/ALGORITHM.md`, sections 1, 2 et « Jeu d'interface ») :
+1. **Jeu d'interface** (`interface_gap_layers` = 1) : les pointes d'arêtes, de coins et de surfaces s'arrêtent une couche sous le modèle, sans pénétration. Les îlots (mains), leur couronne d'ancrage et les points bas restent soudés : sans eux les mains sont sorties en fils à l'essai 2.
+2. **Sévérité des surplombs** (`mild_overhang_spacing` = 2) : les surplombs modérés (55 à 64° en buse 0,2, 55 à 69° en 0,4) reçoivent des contacts deux fois plus espacés ; arêtes, coins, îlots et surplombs sévères gardent la densité.
+
+| Figurine, 0,2 Normal | 0.3.0 | 0.4 |
+|---|---|---|
+| contacts | 111 | 103 (côtés des bras : 6 contacts à 59° en moins) |
+| pointes à jeu d'interface | 0 | 87 |
+| aire de contact / aire soudée au modèle | 9,56 / 9,56 mm² | 9,05 / 4,43 mm² |
+| G-code, contacts plats : 0 / 1 / 2 couches vides | 63 / 0 / 0 | soudés 2 / 0 / 0 ; à jeu 0 / 61 / 0 |
+| volume de supports | 3082 mm³ | 2874 mm³ |
+
+En 0,4 Normal : 80 -> 71 contacts, aire soudée 22,3 -> 11,6 mm². Pente de 60° (`examples/inclined_60deg.stl`, 0,2 Normal) : 91 -> 41 contacts. `shelf`, `bridge` : mêmes contacts, toutes les pointes à jeu.
+
+Ce qui reste à vérifier par impression : que les surplombs tiennent sur des pointes non soudées (essai 2 : torse et bras s'étaient imprimés avec deux couches d'air) ; marques sous les bras et le torse ; les mains gardent leurs 7 pointes soudées, leurs marques ne changent donc pas.

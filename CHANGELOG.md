@@ -2,6 +2,18 @@
 
 All notable changes to ArborFDM. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/) (0.x: anything may still change).
 
+## [Unreleased]
+
+After the 5th print (version 0.3.0: complete, bracing and footprint raft held, deep marks where the tips touched; `docs/PHYSICAL_TESTS.md`, essai 5).
+
+### Added
+- Support interface gap (`interface_gap_layers`, 1 in the profiles): edge, corner and surface tips stop one layer below the model without penetrating, so the slicer leaves an air layer and the tip is not fused to the model. Islands, their anchor ring, low points and manual contacts stay welded. Tips are lowered until their whole top disc clears the gap, and tilted tips get a 2-layer vertical neck. Measured in OrcaSlicer's G-code on the figurine: 0 of 63 flat contacts had an air layer before, 61 of 61 gapped tips have exactly one now.
+- Overhang severity: overhangs that step out by less than 0.75 line width per layer (55 to 64 deg with 0.2 mm profiles, 55 to 69 deg with 0.4 mm) are "moderate" and get contacts `mild_overhang_spacing` (2) times farther apart; edges, corners, islands and steeper overhangs keep the full density. Regions carry `severity`, `verify` uses the same reach. The overhang colours use the engine's severe angle (orange = moderate, red = severe).
+- Stats: `welded_contact_area_mm2`, `interface_gap_contacts`.
+
+### Changed
+- Figurine, 0.2 Normal: 111 -> 103 contacts, contact area welded to the model 9.56 -> 4.43 mm2. 60 deg slope example: 91 -> 41 contacts. Both settings back to 0.3 behaviour with `interface_gap_layers = 0` and `mild_overhang_spacing = 1`.
+
 ## [0.3.0] - 2026-10-16
 
 ### CI and platform support

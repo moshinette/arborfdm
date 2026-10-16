@@ -31,6 +31,12 @@ Liste tenue à jour à partir des rapports des sous-agents et de la revue QA (`d
 - Raft `footprint` par défaut : retrait du modèle sur impression non validé (mesures au trancheur seulement).
 - Pourcentages et couleurs de surface en surplomb par orientation : indication, pas garantie ; leurs seuils (relatifs et absolus) sont empiriques.
 
+## Jeu d'interface et sévérité (0.4)
+
+- Pointes non soudées (jeu d'une couche) : vérifié dans le G-code d'Orca, pas encore par impression. Un surplomb posé sur des pointes fines sans être soudé peut s'affaisser davantage entre elles qu'avec des pointes soudées.
+- Les mains et autres îlots gardent leurs pointes soudées (7 par main) : leurs marques ne changent pas.
+- Seuil « sévère » à 0,75 largeur de ligne par couche : tiré des classes de surplomb d'OrcaSlicer, non mesuré par impression.
+
 ## Interface
 
 - La coupe par hauteur recalcule la géométrie affichée (environ 0,5 s sur 1 M de triangles).

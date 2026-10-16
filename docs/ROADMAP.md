@@ -36,6 +36,14 @@ Chiffres : mesures avec OrcaSlicer 2.4.2 en ligne de commande (figurine 0,2 Norm
 
 Les deux options de supports ne s'additionnent pas (les parois autour du vide coûtent plus que le remplissage faible qu'elles remplacent). Aucune des deux n'est validée par impression.
 
+## Après l'essai 5 (version 0.4, non publiée)
+
+| Fonction | État réel |
+|---|---|
+| Jeu d'interface : pointes non soudées sur arêtes, coins, surfaces | Fait ; vérifié dans le G-code d'Orca (une couche d'air sur 61 contacts plats sur 61), impression à faire |
+| Sévérité des surplombs : contacts deux fois plus espacés sur les surplombs modérés | Fait ; figurine 111 -> 103 contacts, pente de 60° 91 -> 41 ; impression à faire |
+| Marques des mains (7 pointes soudées) | Ouvert : essayer le jeu sur la couronne seulement, en gardant le point bas soudé |
+
 ## Priorité 1 : prochaines étapes recommandées
 
 | Idée | Valeur | Coût | Risque | Notes |

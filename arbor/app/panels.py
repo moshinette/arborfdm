@@ -57,6 +57,11 @@ PARAM_META: dict[str, tuple] = {
                      "Spacing of contacts along hanging edges"),
     "min_contact_distance": ("Contacts", "Merge distance", 0.05, 10, 0.05, 2, "mm",
                              "Contacts closer than this are merged"),
+    "mild_overhang_spacing": ("Contacts", "Moderate overhang spacing", 1.0, 5.0, 0.1, 1, "x",
+                              "Moderate overhangs (orange in the overhang colours: they print with "
+                              "some sagging) get contacts this many times farther apart; severe "
+                              "ones (red), edges, corners and islands keep the full density. "
+                              "1 = same density everywhere"),
     "contact_density": ("Contacts", "Density", 0.1, 5, 0.05, 2, "x",
                         "Multiplier: more than 1 means more contacts"),
     "manual_only": ("Contacts", "Manual contacts only", None, None, None, None, "",
@@ -100,6 +105,11 @@ PARAM_META: dict[str, tuple] = {
                               "Bambu Studio (about -31 % material on supports, measured with "
                               "Orca CLI, not validated by print)"),
     "z_gap": ("Tips", "Z gap", 0.0, 2, 0.01, 3, "mm", "Extra vertical clearance"),
+    "interface_gap_layers": ("Tips", "Interface gap", 0, 3, 1, 0, "layers",
+                             "Air layers between the model and the tips on edges, corners and "
+                             "surfaces, so the tips are not fused to the model and break off "
+                             "cleanly (slicer 'top Z distance'). Islands and low points stay "
+                             "welded. 0 = all tips welded"),
     "xy_clearance": ("Tips", "XY clearance", 0.0, 10, 0.05, 2, "mm",
                      "Min horizontal clearance of branches from the model"),
     "branch_min_diameter": ("Branches / trunks", "Branch min diameter", 0.2, 10, 0.05, 2, "mm", ""),

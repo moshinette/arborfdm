@@ -53,3 +53,10 @@ Haiku (paramètre `model` de l'outil Agent) a servi à l'audit de code et à cet
 - Tests : 646 passed, 1 skipped.
 - Prochaine impression à faire : version 0.3 (raft `footprint` + entretoisement), figurine 0,2 Normal ; elle validera ces deux changements ensemble.
 - Reste ouvert : couronnes de pointes irrégulières sous les mains.
+
+## Mise à jour 2026-10-16 (après l'essai 5, version 0.3.0)
+
+- Essai 5 : impression complète ; entretoisement et raft `footprint` validés ; marques profondes là où les pointes touchaient (pointes soudées), une pointe restée collée à une main. Détail : `docs/PHYSICAL_TESTS.md`.
+- Branche `angirard/overhang-severity-interface-gap` : jeu d'interface (`interface_gap_layers` = 1) et sévérité des surplombs (`mild_overhang_spacing` = 2). Mesures dans `docs/ALGORITHM.md` et `docs/PHYSICAL_TESTS.md`.
+- Prochaine impression à faire : figurine 0,2 Normal avec cette branche ; elle dira si les surplombs tiennent sur des pointes non soudées et si les marques sous les bras et le torse diminuent.
+- Reste ouvert : marques des 7 pointes soudées par main (choix assumé, essai 2).

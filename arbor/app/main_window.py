@@ -513,7 +513,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport.edit_enabled = has
         self._refresh_banner()
         self.viewport.set_tip_preview(p.params.tip_length, p.params.tip_base_diameter)
-        self.viewport.set_overhang_params(p.params.overhang_angle_deg, p.params.layer_height)
+        from arbor.engine.analysis import severe_overhang_angle_deg
+        sev = severe_overhang_angle_deg(p.params) if p.params.mild_overhang_spacing > 1 else None
+        self.viewport.set_overhang_params(p.params.overhang_angle_deg, p.params.layer_height, sev)
         self.view.set_layer_height(p.params.layer_height)
         user = is_user_key(p.profile_key) and p.profile_key in self.presets.presets
         for a in (self.act_preset_rename, self.act_preset_delete, self.act_preset_export):

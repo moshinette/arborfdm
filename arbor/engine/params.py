@@ -41,6 +41,13 @@ class SupportParams:
     min_contact_distance: float = 0.8     # contacts closer than this are merged
     contact_density: float = 1.0          # multiplier (>1 = more contacts)
     manual_only: bool = False             # only user-placed contacts are used
+    # Overhang severity (docs/ALGORITHM.md, "Sévérité des surplombs"): an overhang whose
+    # layers step out by more than the overhang threshold but less than
+    # SEVERE_STEP_LINE_WIDTHS line widths per layer is "moderate" (it prints with some
+    # sagging); its contacts are mild_overhang_spacing times farther apart. Islands,
+    # hanging edges, corners, low points and steeper overhangs keep the full density.
+    # 1 = no distinction (v0.3 behaviour).
+    mild_overhang_spacing: float = 1.0
     # Island anchoring (docs/ALGORITHM.md, "Ancrage des debuts d'ilots"): an island whose
     # first layer is much smaller than its footprint island_anchor_height higher (round
     # bottom that starts in a point: hand, ball, tip of a tail) gets a ring of 6 contacts
@@ -59,6 +66,12 @@ class SupportParams:
     tip_penetration: float = 0.05         # controlled penetration into the model
     tip_shape: str = "cone"               # "cone" | "ball"
     z_gap: float = 0.0                    # extra vertical clearance (subtracted from tip)
+    # Support interface (docs/ALGORITHM.md, "Jeu d'interface"): edge, corner and surface
+    # tips stop this many layers below the model, so the slicer leaves an air layer and
+    # the tip is not fused to the model (the "top Z distance" of slicer supports). Island
+    # contacts (and their anchors) and low points stay welded: a part that starts in
+    # the air needs its first layers held. 0 = every tip welded (v0.3 behaviour).
+    interface_gap_layers: int = 0
     xy_clearance: float = 0.8             # min horizontal clearance of branches from the model
 
     # --- branches / trunks --------------------------------------------------
@@ -204,6 +217,11 @@ class SupportParams:
             p.append("contact spacings must be positive")
         if self.contact_density <= 0:
             p.append("contact_density must be positive")
+        if not 1.0 <= self.mild_overhang_spacing <= 5.0:
+            p.append("mild_overhang_spacing out of range [1, 5]")
+        g = self.interface_gap_layers
+        if not (isinstance(g, (int, float)) and float(g).is_integer() and 0 <= g <= 3):
+            p.append("interface_gap_layers must be an integer in [0, 3]")
         if self.circle_segments < 6:
             p.append("circle_segments must be >= 6")
         if self.tip_shape not in ("cone", "ball"):
