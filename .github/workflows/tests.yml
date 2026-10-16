@@ -62,4 +62,12 @@ jobs:
           python -m arbor profiles
 
       - name: pytest
-        run: python -m pytest -q -p no:cacheprovider -ra
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -p no:cacheprovider -ra 2>&1 | tee pytest.log
+
+      - name: Report pytest failures as annotations
+        if: failure()
+        shell: bash
+        run: python scripts/ci_annotate.py pytest.log
