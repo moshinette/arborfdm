@@ -517,9 +517,15 @@ def cmd_generate(args, out: _Out) -> int:
     if out_path is None:
         pass
     elif out_path.suffix.lower() == ".3mf" and args.layout == "separate":
-        out.info("Separate objects, each resting on the plate: OrcaSlicer / Bambu Studio keep them "
-                 "as separate objects; PrusaSlicer may ask 'Multi-part object detected', both "
-                 "answers keep the alignment (see docs/SLICERS.md).")
+        if res.plate_z < -1e-9:
+            # model resting on the raft: one object with separate parts (export.py)
+            out.info("Model resting on the raft: one object with separate parts (model, supports, "
+                     "raft) so the slicer keeps the alignment; per-part settings work, one layer "
+                     "height for the whole object (see docs/SLICERS.md).")
+        else:
+            out.info("Separate objects, each resting on the plate: OrcaSlicer / Bambu Studio keep "
+                     "them as separate objects; PrusaSlicer may ask 'Multi-part object detected', "
+                     "both answers keep the alignment (see docs/SLICERS.md).")
     elif out_path.suffix.lower() == ".3mf":
         out.info("PrusaSlicer / OrcaSlicer / Bambu Studio: answer 'Yes' to 'Multi-part object "
                  "detected' to keep the model on its supports, or export with --layout separate "

@@ -14,7 +14,11 @@
     Studio) keep the alignment and OrcaSlicer does not merge them. The raft is written in
     the same object as the supports (several shells in one mesh): alone, the supports
     start on top of the raft and would float. Support shells standing only on the model
-    are written in the model object (see :func:`_separate_groups`). Optionally (``layer_heights``) a
+    are written in the model object (see :func:`_separate_groups`). When the model rests on
+    the raft (nothing but the raft touches the plate), everything is ONE object whose
+    parts (model, supports, raft) are components, so OrcaSlicer lists three parts and
+    ``Metadata/model_settings.config`` can give the supports (and raft) their own
+    settings (lighter supports). Optionally (``layer_heights``) a
     ``Metadata/model_settings.config`` gives each object its own ``layer_height`` for
     OrcaSlicer / Bambu Studio (ignored by other consumers). See docs/SLICERS.md.
   * unit="millimeter"; the whole scene is shifted in XY (build item transform) so that
@@ -336,12 +340,16 @@ LIGHT_SUPPORT_SETTINGS = {"wall_loops": 2, "sparse_infill_density": "10%",
 
 def _model_settings_config(objects: Sequence[tuple],
                            extra: Optional[dict[str, str]] = None) -> bytes:
-    """Metadata/model_settings.config declaring each (object id, name, layer height),
-    plus the same ``extra`` key/value settings on every object.
-    The part id is the object id: each object is a single <mesh> object."""
+    """Metadata/model_settings.config declaring each (object id, name, layer height
+    [, own settings [, parts]]), plus the same ``extra`` key/value settings on every
+    object. ``parts`` = [(part id, part name, part settings)] for an object made of
+    components (one <part> per component, id = component object id; OrcaSlicer reads
+    the part settings as volume settings). Without ``parts``, the part id is the object
+    id: each object is a single <mesh> object."""
     root = ET.Element("config")
-    for oid, name, lh, *own in objects:
-        own_settings = own[0] if own else {}
+    for oid, name, lh, *rest in objects:
+        own_settings = rest[0] if rest else {}
+        parts = rest[1] if len(rest) > 1 else None
         o = ET.SubElement(root, "object", id=str(oid))
         ET.SubElement(o, "metadata", key="name", value=name)
         ET.SubElement(o, "metadata", key="extruder", value="1")
@@ -349,8 +357,11 @@ def _model_settings_config(objects: Sequence[tuple],
             ET.SubElement(o, "metadata", key="layer_height", value=f"{lh:g}")
         for k, v in {**(extra or {}), **own_settings}.items():
             ET.SubElement(o, "metadata", key=k, value=v)
-        p = ET.SubElement(o, "part", id=str(oid), subtype="normal_part")
-        ET.SubElement(p, "metadata", key="name", value=name)
+        for pid, pname, psettings in (parts or [(oid, name, {})]):
+            p = ET.SubElement(o, "part", id=str(pid), subtype="normal_part")
+            ET.SubElement(p, "metadata", key="name", value=pname)
+            for k, v in psettings.items():
+                ET.SubElement(p, "metadata", key=k, value=v)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -472,8 +483,13 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
     out.write("<resources>\n")
     names = []
     n_tri = 0
-    for i, (oname, _role, members) in enumerate(groups, start=1):
-        names.append(oname)
+    nid = 0                       # last object id written
+    items: list[int] = []         # build items (object ids)
+    cfg: list[tuple] = []         # (object id, name, role, [(part id, part name, role)])
+
+    def write_mesh_object(oname, members):
+        nonlocal nid, n_tri
+        nid += 1
         txts, fs, nv = [], [], 0
         for pname, m in members:
             txt, _wv, wf, rep = weld_for_export(m, pname) if weld else (
@@ -485,40 +501,65 @@ def export_3mf(path: str | Path, model: trimesh.Trimesh, supports: Optional[trim
             nv += len(txt)
         wf = np.vstack(fs)
         n_tri += len(wf)
-        out.write(f'<object id="{i}" type="model" name={quoteattr(oname)}>')
+        out.write(f'<object id="{nid}" type="model" name={quoteattr(oname)}>')
         out.write(_mesh_xml_from(np.vstack(txts), wf))
         out.write("</object>\n")
+        return nid
+
+    for oname, role, members in groups:
+        if role == "assembly":
+            # one object, several parts: every part is a mesh object, referenced as a
+            # component of the parent that is the only build item
+            pids = [(write_mesh_object(pname, [(pname, m)]), pname, prole) for pname, m, prole in members]
+            nid += 1
+            out.write(f'<object id="{nid}" type="model" name={quoteattr(oname)}><components>')
+            for pid, _pn, _pr in pids:
+                out.write(f'<component objectid="{pid}"/>')
+            out.write("</components></object>\n")
+            names.extend(pn for _p, pn, _r in pids)
+            items.append(nid)
+            cfg.append((nid, oname, role, pids))
+        else:
+            oid = write_mesh_object(oname, members)
+            names.append(oname)
+            items.append(oid)
+            cfg.append((oid, oname, role, [(oid, oname, role)]))
     if layout == "components":
-        pid = len(groups) + 1
+        pid = nid + 1
         out.write(f'<object id="{pid}" type="model" name={quoteattr(model_name + " assembly")}><components>')
-        for i in range(1, len(groups) + 1):
+        for i in range(1, nid + 1):
             out.write(f'<component objectid="{i}"/>')
         out.write("</components></object>\n")
+        items = [pid]
     out.write("</resources>\n<build>\n")
     tr = format_3mf_matrix(tmat)
-    if layout == "components":
-        out.write(f'<item objectid="{len(groups) + 1}" transform="{tr}"/>\n')
-    else:
-        for i in range(1, len(groups) + 1):
-            out.write(f'<item objectid="{i}" transform="{tr}"/>\n')
+    for i in items:
+        out.write(f'<item objectid="{i}" transform="{tr}"/>\n')
     out.write("</build>\n</model>\n")
 
     extra_files: dict[str, bytes] = {}
+    light = layout == "separate" and bool(getattr(params, "light_slicer_supports", False))
+    assembly = any(role == "assembly" for _n, role, _m in groups)
     sup_extra: dict[str, str] = {}
-    if (layout == "separate" and getattr(params, "light_slicer_supports", False)
-            and any(role == "supports" for _n, role, _m in groups)):
+    if light and (assembly or any(role == "supports" for _n, role, _m in groups)):
         sup_extra = _check_object_settings(LIGHT_SUPPORT_SETTINGS)
-        notes.append("Lighter supports (OrcaSlicer / Bambu Studio, supports object only): "
-                     + ", ".join(f"{k} = {v}" for k, v in sup_extra.items()) + ".")
-    if (layout == "separate" and getattr(params, "light_slicer_supports", False)
-            and not any(role == "supports" for _n, role, _m in groups)):
-        notes.append("Lighter supports not applied: the model rests on the raft, so model, "
-                     "supports and raft are one object (use raft coverage 'feet' to keep the "
-                     "supports a separate object).")
-    if lh or extra or sup_extra:
+        notes.append("Lighter supports (OrcaSlicer / Bambu Studio, "
+                     + ("supports and raft parts only" if assembly else "supports object only")
+                     + "): " + ", ".join(f"{k} = {v}" for k, v in sup_extra.items()) + ".")
+    elif light:
+        notes.append("Lighter supports not applied: no separate supports part in this file.")
+    if assembly and lh:
+        notes.append("Per-part layer height is not possible (OrcaSlicer reads the layer height per "
+                     "object, and here the model, supports and raft are parts of one object): "
+                     "layer heights not written, the slicer's own layer height applies.")
+        lh = {}
+    if lh or extra or sup_extra or assembly:
+        def part_settings(role):
+            return sup_extra if role in ("supports", "raft") else {}
         extra_files[BBS_MODEL_CONFIG] = _model_settings_config(
-            [(i, oname, lh.get(role), sup_extra if role == "supports" else {})
-             for i, (oname, role, _m) in enumerate(groups, start=1)],
+            [(oid, oname, lh.get(role), part_settings(role) if role != "assembly" else {},
+              [(pid, pn, part_settings(pr)) for pid, pn, pr in parts])
+             for oid, oname, role, parts in cfg],
             extra)
     if lh:
         notes.append("OrcaSlicer / Bambu Studio per-object layer height: " + ", ".join(
@@ -577,8 +618,11 @@ def _separate_groups(model_name: str, model: trimesh.Trimesh, supports: Optional
       supports object;
     * support shells standing only on the model (their foot is on the model) go with
       the model: alone they would leave empty layers in the supports object;
-    * if the model itself does not reach the plate, everything is one object.
+    * if the model itself does not reach the plate (it rests on the raft), everything is
+      one object with one part per mesh (role ``"assembly"``, members ``(name, mesh,
+      part role)``).
     Every move is reported in ``notes``; no triangle is changed."""
+    saved_notes = list(notes)
     sup_name = f"{model_name} supports"
     model_members = [(model_name, model)]
     sup_members: list[tuple[str, trimesh.Trimesh]] = []
@@ -613,10 +657,20 @@ def _separate_groups(model_name: str, model: trimesh.Trimesh, supports: Optional
     lowest = lambda members: min(float(m.bounds[0][2]) for _, m in members)
     floating = [g for g in groups if lowest(g[2]) > ground]
     if floating and len(groups) == 2:
+        # the model rests on the raft (or the supports do not reach the plate): one object
+        # made of distinct parts (model, supports, raft) keeps the alignment and lets the
+        # slicer list and configure them separately
+        notes.clear()
+        notes.extend(saved_notes)
         notes.append("separate layout: " + ", ".join(
             f"'{g[0]}' does not reach the plate (z min {lowest(g[2]) - plate_z:.3f} mm)" for g in floating)
-            + "; everything is written as one object to keep the alignment.")
-        groups = [(f"{model_name} with supports", "model", groups[0][2] + groups[1][2])]
+            + "; written as one object with separate parts (model, supports, raft) to keep the alignment.")
+        parts = [(model_name, model, "model")]
+        if supports is not None:
+            parts.append((sup_name, supports, "supports"))
+        if raft is not None:
+            parts.append((f"{model_name} raft", raft, "raft"))
+        groups = [(f"{model_name} with supports", "assembly", parts)]
     return groups
 
 

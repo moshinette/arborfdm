@@ -341,9 +341,11 @@ def export_for_slicer(model, supports, raft, params, name: str,
                       notes: Optional[list] = None) -> Path:
     """Write model + supports (+ raft) as a 3MF for OrcaSlicer and return its path.
 
-    Layout ``separate`` (two objects resting on the plate, positions and scale kept),
+    Layout ``separate`` (two objects resting on the plate, or, when the model rests on the
+    raft, one object with parts model / supports / raft; positions and scale kept),
     ``enable_support = 0`` on every object unless ``disable_slicer_supports`` is False,
-    optional per-object ``layer_heights`` ({"model": mm, "supports": mm}). The file name
+    optional per-object ``layer_heights`` ({"model": mm, "supports": mm}; not possible in the
+    one-object case, a note is added). The file name
     is ``<name>_<YYYYmmdd-HHMMSS>.3mf`` (unique, never overwrites anything) in ``out_dir``
     (default :func:`to_slicer_dir`). Old files are then pruned (:func:`cleanup_to_slicer_dir`).
     The meshes are not modified. Raises SlicerExportError (invalid file, write error) or

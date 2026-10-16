@@ -219,6 +219,22 @@ def test_generate_separate_layout_with_layer_heights(tmp_path, capsys):
         assert part.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6), part.name
 
 
+def test_generate_separate_default_raft_is_one_object_three_parts(tmp_path, capsys):
+    """Default raft (model on the raft): one object with parts model / supports / raft;
+    lighter-supports settings on the supports and raft parts only."""
+    out = tmp_path / "asm.3mf"
+    rc = main(["generate", _ex("shelf"), "-o", str(out), "--layout", "separate",
+               "--set", "light_slicer_supports=true"])
+    assert rc == EXIT_OK
+    assert validate_export(out) == []
+    assert [p.name for p in read_3mf(out).parts] == ["shelf", "shelf supports", "shelf raft"]
+    with zipfile.ZipFile(out) as z:
+        cfg = z.read("Metadata/model_settings.config").decode()
+    assert cfg.count("<object ") == 1 and cfg.count("<part ") == 3
+    assert cfg.count('key="wall_loops"') == 2          # supports + raft parts, not the model
+    assert "not applied" not in capsys.readouterr().out
+
+
 def test_layer_height_options_need_separate_layout(tmp_path):
     out = tmp_path / "x.3mf"
     assert main(["generate", _ex("shelf"), "-o", str(out), "--model-layer-height", "0.1"]) == EXIT_USAGE

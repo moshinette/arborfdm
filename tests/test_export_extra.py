@@ -280,19 +280,73 @@ def test_separate_layout_without_raft_or_supports(tmp_path):
         assert validate_export(tmp_path / f"{f}.3mf") == []
 
 
-def test_separate_layout_floating_model_becomes_one_object(tmp_path):
-    """A model lifted above the plate (resting only on its supports) cannot be a
+def _config_parts(path):
+    """{object name: (object settings, {part name: part settings})} of model_settings.config."""
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("Metadata/model_settings.config"))
+    md = lambda e: {m.get("key"): m.get("value") for m in e.findall("metadata")}
+    return {md(o)["name"]: (md(o), {md(p)["name"]: md(p) for p in o.findall("part")})
+            for o in root.findall("object")}
+
+
+def test_separate_layout_floating_model_becomes_one_object_with_parts(tmp_path):
+    """A model lifted above the plate (resting only on its supports/raft) cannot be a
     separate object: it would be dropped (alignment lost) or refused by OrcaSlicer
-    (empty first layer). Everything is written as one object, with a note."""
+    (empty first layer). One object, three distinct parts (model, supports, raft) as
+    components; no per-part layer height is possible, the note says so."""
+    import xml.etree.ElementTree as ET
     model, sup, raft = _scene(on_model_shell=False)
     model.apply_translation((0, 0, 2.0))
-    er = export_3mf(tmp_path / "f.3mf", model, sup, raft, model_name="m", layout="separate",
+    p = tmp_path / "f.3mf"
+    er = export_3mf(p, model, sup, raft, model_name="m", layout="separate",
                     layer_heights={"model": 0.1, "supports": 0.2})
-    assert er.objects == ["m with supports"]
+    assert er.objects == ["m", "m supports", "m raft"]
     assert any("does not reach the plate" in n for n in er.notes)
-    root = ET.fromstring(_objects(tmp_path / "f.3mf")[2])
-    (o,) = root.findall("object")
-    assert {m.get("key"): m.get("value") for m in o.findall("metadata")}["layer_height"] == "0.1"
+    assert any("Per-part layer height is not possible" in n for n in er.notes)
+    assert validate_export(p) == []
+    with zipfile.ZipFile(p) as z:
+        root = ET.fromstring(z.read("3D/3dmodel.model"))
+    ns = "{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}"
+    (item,) = root.iter(ns + "item")
+    (parent,) = [o for o in root.iter(ns + "object") if o.find(ns + "components") is not None]
+    assert item.get("objectid") == parent.get("id") and parent.get("name") == "m with supports"
+    comps = [c.get("objectid") for c in parent.iter(ns + "component")]
+    assert len(comps) == 3
+    (obj, parts) = _config_parts(p)["m with supports"]
+    assert list(parts) == ["m", "m supports", "m raft"]
+    assert "layer_height" not in obj
+    # same positions as the input meshes (plate coordinates, shifted in z only by the offset)
+    z0 = {c.name: c.mesh.bounds[0][2] for c in read_3mf(p).parts}
+    assert z0["m raft"] == pytest.approx(raft.bounds[0][2] + er.offset[2], abs=1e-5)
+    assert z0["m"] == pytest.approx(model.bounds[0][2] + er.offset[2], abs=1e-5)
+
+
+def test_separate_layout_assembly_lib3mf_strict(tmp_path):
+    lib3mf = pytest.importorskip("lib3mf")
+    model, sup, raft = _scene(on_model_shell=False)
+    model.apply_translation((0, 0, 2.0))
+    p = tmp_path / "asm.3mf"
+    export_3mf(p, model, sup, raft, model_name="m", layout="separate",
+               object_settings={"enable_support": False})
+    m = lib3mf.get_wrapper().CreateModel()
+    r = m.QueryReader("3mf")
+    r.SetStrictModeActive(True)
+    r.ReadFromFile(str(p))
+    assert r.GetWarningCount() == 0, [r.GetWarning(i) for i in range(r.GetWarningCount())]
+    assert m.GetComponentsObjects().Count() == 1 and m.GetBuildItems().Count() == 1
+
+
+def test_assembly_without_raft_has_two_parts(tmp_path):
+    model, sup, _raft = _scene(on_model_shell=False)
+    model.apply_translation((0, 0, 2.0))
+    # supports that do not reach the plate: model and supports both float
+    sup2 = sup.copy()
+    sup2.apply_translation((0, 0, 1.0))
+    p = tmp_path / "two.3mf"
+    er = export_3mf(p, model, sup2, None, model_name="m", layout="separate")
+    assert er.objects == ["m", "m supports"]
+    assert list(_config_parts(p)["m with supports"][1]) == ["m", "m supports"]
 
 
 def test_layer_heights_need_separate_layout(tmp_path):
@@ -322,9 +376,10 @@ def test_separate_layout_on_engine_output(tmp_path):
                     layout="separate", layer_heights={"model": 0.12, "supports": 0.24})
     assert validate_export(p) == []
     parts = read_3mf(p).parts
-    assert 1 <= len(parts) <= 2
+    # model on the raft: one object, three parts; the object (raft) rests on the plate
+    assert [pt.name for pt in parts] == ["shelf", "shelf supports", "shelf raft"]
+    assert min(pt.mesh.bounds[0][2] for pt in parts) == pytest.approx(0.0, abs=1e-6)
     for pt in parts:
-        assert pt.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6), pt.name
         assert check_mesh(pt.mesh).watertight, pt.name
     total = m.volume + res.support_mesh.volume + res.raft_mesh.volume
     assert sum(abs(pt.mesh.volume) for pt in parts) == pytest.approx(total, rel=1e-5)
@@ -362,9 +417,9 @@ def test_light_slicer_supports_only_on_supports_object(tmp_path):
         assert "Metadata/model_settings.config" not in z.namelist()
 
 
-def test_light_supports_reported_when_model_rests_on_raft(tmp_path):
-    """Model on the raft (default coverage): one object, so the lighter-supports settings
-    cannot be applied; the export says so instead of ignoring them silently."""
+def test_light_supports_per_part_when_model_rests_on_raft(tmp_path):
+    """Model on the raft (default coverage): one object with three parts; the lighter
+    settings are on the supports (and raft) parts only, never on the model part."""
     from arbor.engine import pipeline
     from arbor.engine.params import load_profiles
     from tests.models import synthetic as S
@@ -372,6 +427,22 @@ def test_light_supports_reported_when_model_rests_on_raft(tmp_path):
     p = load_profiles()["nozzle_04_normal"].params.updated(light_slicer_supports=True)
     assert p.raft_enabled and p.raft_coverage == "footprint"
     res = pipeline.generate(m, p)
-    er = export_3mf(tmp_path / "one.3mf", m, res.support_mesh, res.raft_mesh, p,
-                    model_name="shelf", layout="separate")
-    assert any("Lighter supports not applied" in n for n in er.notes), er.notes
+    path = tmp_path / "one.3mf"
+    er = export_3mf(path, m, res.support_mesh, res.raft_mesh, p, model_name="shelf",
+                    layout="separate", object_settings={"enable_support": False})
+    assert not any("not applied" in n for n in er.notes), er.notes
+    assert any("Lighter supports" in n and "parts only" in n for n in er.notes), er.notes
+    (obj, parts), = _config_parts(path).values()
+    assert list(parts) == ["shelf", "shelf supports", "shelf raft"]
+    assert obj["enable_support"] == "0" and "wall_loops" not in obj
+    assert "wall_loops" not in parts["shelf"] and "sparse_infill_density" not in parts["shelf"]
+    for k in ("shelf supports", "shelf raft"):
+        assert parts[k]["wall_loops"] == "2" and parts[k]["sparse_infill_density"] == "10%"
+        assert parts[k]["minimum_sparse_infill_area"] == "0"
+    # without the option: parts are still named, no per-part setting
+    path0 = tmp_path / "plain.3mf"
+    export_3mf(path0, m, res.support_mesh, res.raft_mesh, p.updated(light_slicer_supports=False),
+               model_name="shelf", layout="separate")
+    (_o, parts0), = _config_parts(path0).values()
+    assert list(parts0) == ["shelf", "shelf supports", "shelf raft"]
+    assert all(set(v) == {"name"} for v in parts0.values())

@@ -254,10 +254,11 @@ def test_lifted_export_keeps_alignment(ball_lifted, tmp_path):
     er = export_3mf(path, m, r.support_mesh, r.raft_mesh, P02, model_name="ball", layout="separate")
     assert validate_export(path) == []
     # the model does not touch the plate: written as one object, shifted as a whole
-    assert er.objects == ["ball with supports"]
+    # model on the raft: one object with separate parts (export.py, docs/SLICERS.md)
+    assert er.objects == ["ball", "ball supports", "ball raft"]
     assert er.offset[2] == pytest.approx(P02.raft_thickness + G + r.model_lift, abs=1e-6)
     g = list(trimesh.load(path).dump(concatenate=False))
-    assert len(g) == 1 and g[0].bounds[0, 2] == pytest.approx(0.0, abs=1e-5)
+    assert len(g) == 3 and min(x.bounds[0, 2] for x in g) == pytest.approx(0.0, abs=1e-5)
     assert g[0].bounds[1, 2] == pytest.approx(m.bounds[1, 2] + er.offset[2], abs=1e-4)
 
 

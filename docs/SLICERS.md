@@ -14,7 +14,7 @@ Consulté le 2026-10-15. Les § 1 à 5 viennent de la lecture du code source des
 | Objets | un `<object type="model">` par pièce : `<nom>`, `<nom> supports`, `<nom> raft` (si radeau). Pas de `type="support"` (jeté par la famille PrusaSlicer, cf. § 2) |
 | Disposition `objects` (défaut) | un `<item>` par pièce, même transform (translation vers l'octant positif) |
 | Disposition `components` (`--layout components`) | un objet parent `<nom> assembly` fait de `<component>`, un seul `<item>` |
-| Disposition `separate` (`--layout separate`) | deux objets **qui touchent tous les deux le plateau** : `<nom>` et `<nom> supports + raft` (radeau et supports dans le même maillage) ; les arbres posés uniquement sur le modèle vont dans l'objet modèle. Option : `Metadata/model_settings.config` avec une hauteur de couche par objet (Orca/Bambu). Cf. § « Cause trouvée » |
+| Disposition `separate` (`--layout separate`) | deux objets **qui touchent tous les deux le plateau** : `<nom>` et `<nom> supports + raft` (radeau et supports dans le même maillage) ; les arbres posés uniquement sur le modèle vont dans l'objet modèle. Option : `Metadata/model_settings.config` avec une hauteur de couche par objet (Orca/Bambu). Cf. § « Cause trouvée ». Modèle posé sur le radeau : un objet à 3 pièces, cf. § « Modèle posé sur le radeau » |
 | Position | modèle et supports en coordonnées plateau ; le modèle **ne touche pas** le plateau quand il repose sur ses supports (z min modèle > 0) |
 | Maillages | chaque pièce est fermée et 2-manifold ; les sommets à moins de 1e-5 mm sont soudés à l'écriture (cf. § 4) |
 | Extensions | aucune (ni `Slic3r_PE_model.config`, ni Production) ; `Metadata/model_settings.config` (Orca/Bambu) seulement avec `--layout separate` et une hauteur de couche par objet, et dans le fichier « Open in OrcaSlicer » (`enable_support = 0` par objet, dernière section) |
@@ -139,6 +139,13 @@ Dans OrcaSlicer 2.4.2 (A1 mini, buse 0,2, supports Orca désactivés), Fichier >
 6. Refaire l'import avec le fichier `--layout objects` et noter si le dialogue « Multi-part object detected » apparaît (point 3 de la cause).
 
 [^orca242]: OrcaSlicer, tag `v2.4.2` (commit `8500fcdccaa10b5099ac20d252af3a7c560046f1`) : <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/slic3r/GUI/Plater.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Model.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Format/bbs_3mf.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/GCode.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/libslic3r/Print.cpp>, <https://github.com/SoftFever/OrcaSlicer/blob/v2.4.2/src/OrcaSlicer.cpp>. Binaire essayé : `OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage` (release GitHub v2.4.2).
+
+### Modèle posé sur le radeau (radeau « footprint » par défaut) : un objet, trois pièces
+
+Quand seul le radeau touche le plateau, `separate` écrit **un objet `<nom> with supports` dont les pièces sont `<nom>`, `<nom> supports`, `<nom> raft`** (2 pièces sans radeau) : trois `<object>` maillage référencés par un `<components>` (un seul `<item>`), comme `components`, plus `Metadata/model_settings.config` avec un `<part id=... subtype="normal_part">` par composant (l'id de la pièce est l'id de l'objet composant). Orca (`bbs_3mf.cpp` `_generate_volumes_new`, v2.4.2) fait de chaque composant un volume, nomme les volumes avec le `name` de la pièce et applique les `<metadata>` de la pièce comme réglages du volume. Positions conservées (l'objet entier touche le plateau).
+- « Supports plus légers » : `wall_loops = 2`, `sparse_infill_density = 10 %`, `minimum_sparse_infill_area = 0` sur les pièces supports et radeau seulement ; `enable_support = 0` reste sur l'objet.
+- Hauteur de couche par pièce impossible (réglage d'objet dans Orca) : `layer_heights` est ignoré dans ce cas, avec une note.
+- CLI Orca 2.4.2, figurine, `nozzle_02_normal`, A1 mini 0,2 : projet réexporté = 1 objet, 3 pièces nommées ; z min radeau 0, supports 0,16, modèle 0,24 (décalages d'entrée conservés) ; aucune descente. Sans réglage : 9,96 g, 4 h 01. Réglages légers sur supports + radeau : 8,73 g, 3 h 26. Les mêmes réglages sur la seule pièce modèle : 8,13 g, 3 h 40 (les réglages sont donc bien propres à chaque pièce). lib3mf strict : 0 avertissement.
 
 ## Ouvrir dans OrcaSlicer (bouton « Open in OrcaSlicer », `arborfdm-cli generate ... --open-in-orca`)
 
